@@ -45,9 +45,20 @@ jobs:
           flyway -locations=filesystem:./sql/baseline,filesystem:./sql/migrations migrate
 
       - name: Rodar testes SQL
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: postgres
+          PGDATABASE: dpg_dev
         run: |
           mkdir -p tests_output
-          docker run --rm --network host -v ${{ github.workspace }}/tests:/tests -v ${{ github.workspace }}/tests_output:/tests_output postgres:16 \
-            sh -c "psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off -h localhost -p 5432 -U postgres -d dpg_dev -f /tests/test_paa_rio.sql > /tests_output/test_paa_rio_result.json"
+          docker run --rm --network host \
+            -e PGPASSWORD=${{ secrets.POSTGRES_PASSWORD }} \
+            -v ${{ github.workspace }}/tests:/tests \
+            -v ${{ github.workspace }}/tests_output:/tests_output \
+            postgres:16 \
+            sh -c "psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
+                  -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDATABASE \
+                  -f /tests/test_paa_rio.sql > /tests_output/test_paa_rio_result.json"
           echo "Resultado do teste:"
           cat tests_output/test_paa_rio_result.json
