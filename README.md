@@ -1,7 +1,5 @@
 # 🐘 pg-flyway-test-runner
 
-# 🐘 pg-flyway-test-runner
-
 [![CI](https://github.com/emanuelpedrozo/pg-flyway-test-runner/actions/workflows/ci.yml/badge.svg)](https://github.com/emanuelpedrozo/pg-flyway-test-runner/actions)  
 ![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-blue?logo=postgresql)  
 ![PostGIS 3.5](https://img.shields.io/badge/PostGIS-3.5-00aaff)  
