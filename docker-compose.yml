@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.5
+    container_name: pg16
+    environment:
+      POSTGRES_USER: ${PGUSER}
+      POSTGRES_PASSWORD: ${PGPASSWORD}
+      POSTGRES_DB: ${PGDATABASE}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER} -d ${PGDATABASE} -h localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+
+  flyway-migrate:
+    image: flyway/flyway:10
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FLYWAY_URL: jdbc:postgresql://${PGHOST}:${PGPORT}/${PGDATABASE}
+      FLYWAY_USER: ${PGUSER}
+      FLYWAY_PASSWORD: ${PGPASSWORD}
+      FLYWAY_SCHEMAS: ${FLYWAY_SCHEMAS}
+      FLYWAY_CLEAN_DISABLED: "true"
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql/baseline,filesystem:/flyway/sql/migrations
+    command: migrate
+    volumes:
+      - ./sql:/flyway/sql:ro
+    restart: "no"
+
+  db-tests:
+    image: postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
+      flyway-migrate:
+        condition: service_completed_successfully
+    environment:
+      PGPASSWORD: postgres   # ajuste se sua senha for outra
+    command: ["sh","-c","mkdir -p /tests_output && psql -v ON_ERROR_STOP=1 -h postgres -p 5432 -U postgres -d dpg_dev -f /tests/test_paa_rio.sql && ls -lah /tests_output"]
+
+    volumes:
+      - ./tests:/tests:ro
+      - ./tests_output:/tests_output
+    restart: "no"
+
+volumes:
+  pgdata:

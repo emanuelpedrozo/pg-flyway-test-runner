@@ -1,0 +1,5 @@
+# docker
+pgdata/
+tests_output/
+.env
+*.log

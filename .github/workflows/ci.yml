@@ -1,0 +1,53 @@
+name: Flyway + Test CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.5
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dpg_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dpg_dev"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      - name: Instala Flyway
+        run: |
+          wget -qO- https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/10.22.0/flyway-commandline-10.22.0-linux-x64.tar.gz | tar xz
+          sudo ln -s `pwd`/flyway-10.22.0/flyway /usr/local/bin/flyway
+
+      - name: Aplicar baseline e migrações
+        env:
+          FLYWAY_URL: jdbc:postgresql://localhost:5432/dpg_dev
+          FLYWAY_USER: postgres
+          FLYWAY_PASSWORD: postgres
+          FLYWAY_SCHEMAS: geometry_bases
+          FLYWAY_CLEAN_DISABLED: "true"
+        run: |
+          flyway -locations=filesystem:./sql/baseline,filesystem:./sql/migrations migrate
+
+      - name: Rodar testes SQL
+        run: |
+          mkdir -p tests_output
+          docker run --rm --network host -v ${{ github.workspace }}/tests:/tests -v ${{ github.workspace }}/tests_output:/tests_output postgres:16 \
+            sh -c "psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off -h localhost -p 5432 -U postgres -d dpg_dev -f /tests/test_paa_rio.sql > /tests_output/test_paa_rio_result.json"
+          echo "Resultado do teste:"
+          cat tests_output/test_paa_rio_result.json
