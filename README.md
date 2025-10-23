@@ -1,5 +1,13 @@
 # 🐘 pg-flyway-test-runner
 
+# 🐘 pg-flyway-test-runner
+
+[![CI](https://github.com/emanuelpedrozo/pg-flyway-test-runner/actions/workflows/ci.yml/badge.svg)](https://github.com/emanuelpedrozo/pg-flyway-test-runner/actions)  
+![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-blue?logo=postgresql)  
+![PostGIS 3.5](https://img.shields.io/badge/PostGIS-3.5-00aaff)  
+![Flyway 10.x](https://img.shields.io/badge/Flyway-10.x-red)  
+![Docker Ready](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)  
+
 Ambiente **Docker + Flyway + PostGIS** para **versionamento, migração e testes automatizados** de funções SQL em PostgreSQL.
 
 Este projeto foi criado para padronizar e automatizar o ciclo de vida de funções de banco de dados — desde a criação e versionamento até a execução de testes automatizados e CI/CD completo no GitHub Actions.

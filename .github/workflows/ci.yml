@@ -5,6 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -15,7 +16,7 @@ jobs:
         image: postgis/postgis:16-3.5
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           POSTGRES_DB: dpg_dev
         ports:
           - 5432:5432
@@ -23,7 +24,7 @@ jobs:
           --health-cmd "pg_isready -U postgres -d dpg_dev"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
 
     steps:
       - name: Checkout repositório
@@ -31,34 +32,45 @@ jobs:
 
       - name: Instala Flyway
         run: |
-          wget -qO- https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/10.22.0/flyway-commandline-10.22.0-linux-x64.tar.gz | tar xz
-          sudo ln -s `pwd`/flyway-10.22.0/flyway /usr/local/bin/flyway
+          curl -sL https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/10.22.0/flyway-commandline-10.22.0-linux-x64.tar.gz \
+            | tar xz
+          sudo ln -s "$PWD/flyway-10.22.0/flyway" /usr/local/bin/flyway
+          flyway -v
 
       - name: Aplicar baseline e migrações
         env:
           FLYWAY_URL: jdbc:postgresql://localhost:5432/dpg_dev
           FLYWAY_USER: postgres
-          FLYWAY_PASSWORD: postgres
+          FLYWAY_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           FLYWAY_SCHEMAS: geometry_bases
           FLYWAY_CLEAN_DISABLED: "true"
         run: |
           flyway -locations=filesystem:./sql/baseline,filesystem:./sql/migrations migrate
+          flyway info
 
-      - name: Rodar testes SQL
+      - name: Rodar TODOS os testes SQL e salvar saída
         env:
-          PGHOST: localhost
-          PGPORT: 5432
-          PGUSER: postgres
-          PGDATABASE: dpg_dev
+          PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
           mkdir -p tests_output
           docker run --rm --network host \
-            -e PGPASSWORD=${{ secrets.POSTGRES_PASSWORD }} \
-            -v ${{ github.workspace }}/tests:/tests \
-            -v ${{ github.workspace }}/tests_output:/tests_output \
+            -e PGPASSWORD="${PGPASSWORD}" \
+            -v "${{ github.workspace }}/tests:/tests" \
+            -v "${{ github.workspace }}/tests_output:/tests_output" \
             postgres:16 \
-            sh -c "psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
-                  -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDATABASE \
-                  -f /tests/test_paa_rio.sql > /tests_output/test_paa_rio_result.json"
-          echo "Resultado do teste:"
-          cat tests_output/test_paa_rio_result.json
+            sh -lc 'set -euo pipefail;
+              ls -1 /tests/*.sql 2>/dev/null | while read -r f; do
+                base="$(basename "$f" .sql)";
+                echo "==> Executando $base.sql";
+                psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
+                     -h localhost -p 5432 -U postgres -d dpg_dev \
+                     -f "$f" > "/tests_output/${base}_result.json";
+              done;
+              echo "Arquivos gerados em /tests_output:"; ls -lah /tests_output'
+
+      - name: Upload dos artefatos de testes (.json)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-test-results
+          path: tests_output/**/*.json
+          if-no-files-found: error
