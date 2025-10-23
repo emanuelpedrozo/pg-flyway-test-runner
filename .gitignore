@@ -3,3 +3,8 @@ pgdata/
 tests_output/
 .env
 *.log
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
