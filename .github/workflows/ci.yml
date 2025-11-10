@@ -1,4 +1,4 @@
-name: Flyway + Test CI
+name: Flyway + Test CI + Map Viewer
 
 on:
   push:
@@ -74,3 +74,32 @@ jobs:
           name: sql-test-results
           path: tests_output/**/*.json
           if-no-files-found: error
+
+      # ---------- Publish Viewer (sem heredoc) ----------
+      - name: Preparar viewer (copiar JSONs e gerar manifest)
+        if: ${{ hashFiles('tests_output/*.json') != '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p viewer
+          cp tests_output/*.json viewer/ 2>/dev/null || true
+
+          # Gera manifest.json com os nomes dos arquivos
+          echo '[' > viewer/manifest.json
+          sep=''
+          for f in viewer/*.json; do
+            [ -e "$f" ] || continue
+            bn="$(basename "$f")"
+            printf "%s  \"%s\"\n" "$sep" "$bn" >> viewer/manifest.json
+            sep=','
+          done
+          echo ']' >> viewer/manifest.json
+
+          # Copia o template HTML para a pasta do viewer
+          cp .github/viewer_template.html viewer/index.html
+
+      - name: Publicar viewer no GitHub Pages
+        if: ${{ hashFiles('viewer/*.json') != '' }}
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./viewer

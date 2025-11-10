@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DPG — GeoJSON Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { margin:0; font-family: system-ui, sans-serif; }
+    #topbar { padding: 8px 12px; background:#111; color:#fff; display:flex; gap:12px; align-items:center; }
+    #topbar select { padding:6px 8px; }
+    #map { height: calc(100vh - 48px); width: 100vw; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <div><strong>DPG — GeoJSON Viewer</strong></div>
+    <label>Arquivo:
+      <select id="fileSel"></select>
+    </label>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([-14.2350,-51.9253], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom: 18}).addTo(map);
+
+    const layerGroup = L.layerGroup().addTo(map);
+    const sel = document.getElementById('fileSel');
+
+    async function loadManifest() {
+      const files = await fetch('manifest.json').then(r=>r.json());
+      sel.innerHTML = '';
+      for (const f of files) {
+        const opt = document.createElement('option');
+        opt.value = f; opt.textContent = f;
+        sel.appendChild(opt);
+      }
+      if (files.length) { loadFile(files[0]); }
+    }
+
+    async function loadFile(name) {
+      const data = await fetch(name).then(r=>r.json());
+      layerGroup.clearLayers();
+      const gj = L.geoJSON(data, {
+        style: f => ({
+          color: f?.properties?.color || '#3388ff',
+          weight: 2,
+          fillOpacity: 0.25
+        })
+      }).addTo(layerGroup);
+      try { map.fitBounds(gj.getBounds(), {padding:[20,20]}); } catch {}
+    }
+
+    sel.addEventListener('change', e => loadFile(e.target.value));
+    loadManifest();
+  </script>
+</body>
+</html>
