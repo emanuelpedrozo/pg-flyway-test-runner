@@ -1,11 +1,5 @@
 
 -- ===================================================================
--- SCHEMA: geometry_bases
--- ===================================================================
-CREATE SCHEMA IF NOT EXISTS geometry_bases;
-SET search_path = geometry_bases, public;
-
--- ===================================================================
 -- HELPERS
 -- ===================================================================
 
@@ -32,7 +26,6 @@ $function$
 ;
 
 
-
 -- DROP FUNCTION geometry_bases.f_get_layer_geom(jsonb, text, text);
 
 CREATE OR REPLACE FUNCTION geometry_bases.f_get_layer_geom(p_fc jsonb, p_layer text, p_expected_geom text)
@@ -54,26 +47,68 @@ BEGIN
     RETURN NULL;
   END IF;
 
+  -- PASSO 1: Itera em todas as features
   FOR f IN SELECT * FROM jsonb_array_elements(p_fc->'features') LOOP
+    -- Encontra o layer (procurando por 'layerCode' ou 'tipo')
     this_layer := upper(coalesce(f->'properties'->>'layerCode', f->'properties'->>'tipo',''));
     IF this_layer <> layer_want THEN CONTINUE; END IF;
 
+    -- Filtra pelo tipo de geometria esperado (POLYGON, LINESTRING, ou POINT)
     geom_type := upper(coalesce(f->'geometry'->>'type',''));
     IF want = 'POLYGON'    AND geom_type NOT IN ('POLYGON','MULTIPOLYGON') THEN CONTINUE;
     ELSIF want = 'LINESTRING' AND geom_type NOT IN ('LINESTRING','MULTILINESTRING') THEN CONTINUE;
     ELSIF want = 'POINT'      AND geom_type NOT IN ('POINT','MULTIPOINT') THEN CONTINUE; END IF;
 
+    -- Converte a geometria do GeoJSON
     g := ST_SetSRID(ST_GeomFromGeoJSON((f->'geometry')::text), srid_in);
 
+    -- PASSO 2: Agrega (Coleta) todas as geometrias encontradas
     g_out := CASE WHEN g_out IS NULL THEN g ELSE ST_Collect(g_out, g) END;
   END LOOP;
 
   IF g_out IS NULL THEN RETURN NULL; END IF;
 
-  IF GeometryType(g_out) IN ('POLYGON','MULTIPOLYGON') THEN
-    g_out := ST_Buffer(ST_MakeValid(g_out), 0);
+   ---------------------------------------------------------------------------------
+  -- PASSO 3: CORREÇÃO
+   ---------------------------------------------------------------------------------
+  -- Valida, Dissolve (ST_UnaryUnion) e extrai o tipo de geometria correto.
+  -- Isso corrige o bug onde ST_Collect criava uma GeometryCollection que
+  -- falhava ao tentar dissolver polígonos sobrepostos com ST_Buffer(..., 0).
+  
+  IF want = 'POLYGON' THEN
+      -- 1. Valida a coleção de geometrias
+      -- 2. Dissolve (une) todas as geometrias sobrepostas
+      -- 3. Extrai apenas os Polígonos (tipo 3) do resultado
+      -- 4. Garante que a saída seja um MultiPolygon
+      g_out := ST_Multi(
+                 ST_CollectionExtract(
+                   ST_UnaryUnion(
+                     ST_MakeValid(g_out)
+                   ), 3
+                 )
+               );
+  
+  ELSIF want = 'LINESTRING' THEN
+      -- Mesma lógica, mas extrai Linhas (tipo 2)
+      g_out := ST_Multi(
+                 ST_CollectionExtract(
+                   ST_UnaryUnion(
+                     ST_MakeValid(g_out)
+                   ), 2
+                 )
+               );
+  
+  ELSIF want = 'POINT' THEN
+      -- Mesma lógica, mas extrai Pontos (tipo 1)
+      -- ST_UnaryUnion não é usado para pontos
+      g_out := ST_Multi(
+                 ST_CollectionExtract(
+                   ST_MakeValid(g_out), 1
+                 )
+               );
   ELSE
-    g_out := ST_MakeValid(g_out);
+      -- Se nenhum tipo específico foi pedido, apenas valida a coleção
+      g_out := ST_MakeValid(g_out);
   END IF;
 
   RETURN g_out;
@@ -91,26 +126,22 @@ CREATE OR REPLACE FUNCTION geometry_bases.f_make_feature(p_layer_code text, p_ge
  IMMUTABLE
 AS $function$
 DECLARE
-  srid_in int := 4674;
-  gjson  jsonb;
-  gjson_with_crs jsonb;
+  -- O SRID do GeoJSON de saída (WGS 84)
+  srid_out int := 4326; 
+  gjson    jsonb;
 BEGIN
   IF p_geom IS NULL THEN
-    gjson_with_crs := NULL;
+    gjson := NULL;
   ELSE
-    gjson := ST_AsGeoJSON(ST_SetSRID(p_geom, srid_in))::jsonb;
-    gjson_with_crs := gjson || jsonb_build_object(
-      'crs', jsonb_build_object(
-        'type','name',
-        'properties', jsonb_build_object('name', 'EPSG:'||srid_in::text)
-      )
-    );
+    -- CORREÇÃO: Transforma a geometria do SRID de trabalho (assumido 4674)
+    -- para o SRID padrão do GeoJSON (4326) e remove o 'crs'.
+    gjson := ST_AsGeoJSON(ST_Transform(p_geom, srid_out))::jsonb;
   END IF;
 
   RETURN jsonb_build_object(
     'type','Feature',
     'properties', coalesce(p_properties, '{}'::jsonb) || jsonb_build_object('layerCode', p_layer_code),
-    'geometry', gjson_with_crs
+    'geometry', gjson
   );
 END;
 $function$
@@ -136,6 +167,7 @@ AS $function$
          END;
 $function$
 ;
+
 
 
 -- DROP FUNCTION geometry_bases.f_fc_replace_layer(jsonb, text, jsonb);
@@ -168,6 +200,7 @@ $function$
 
 
 
+
 -- ===================================================================
 -- FUNÇÃO 1: Rural Property
 -- ===================================================================
@@ -180,57 +213,53 @@ CREATE OR REPLACE FUNCTION geometry_bases.rural_property(p_fc jsonb)
  STABLE
 AS $function$
 DECLARE
-  srid_in  int := 4674;
-  srid_met int := 31983;
-
+  -- srid_in e srid_met não são mais necessários para o cálculo de área
   g_imovel   geometry;
-  g_imovel_m geometry;
-
   area_ha    numeric;
-
   props_orig jsonb := '{}'::jsonb;
   feat_new   jsonb;
 BEGIN
-  -- 1) Geometria do imóvel
+  -- 1) Geometria do imóvel (Assumindo que f_get_layer_geom
+  --    já agrega (ST_Union) e valida (ST_MakeValid) todas as
+  --    features 'RURAL_PROPERTY' e retorna uma geometria única em SRID 4674)
   g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
+  
   IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
     RETURN p_fc;  -- nada a fazer
   END IF;
 
-  -- 2) Sanitizar
-  g_imovel   := ST_Buffer(ST_MakeValid(g_imovel), 0);
-  g_imovel_m := ST_Transform(g_imovel, srid_met);
+   -- 2) Área total (ha)
+  -- CORREÇÃO: Usando 'geography' para cálculo de área universal e preciso,
+  -- sem depender de um SRID métrico (UTM) fixo.
+  area_ha := round( (ST_Area(g_imovel::geography) / 10000.0)::numeric, 4 );
 
-  -- 3) Área total (ha)
-  area_ha := round( (ST_Area(g_imovel_m) / 10000.0)::numeric, 4 );
-
-  -- 4) Trazer as propriedades originais do feature (para manter estilo, etc.)
+  -- 3) Trazer as propriedades originais da PRIMEIRA feature encontrada
   SELECT feat->'properties'
     INTO props_orig
   FROM jsonb_array_elements(p_fc->'features') AS feat
   WHERE upper(feat->'properties'->>'layerCode') = 'RURAL_PROPERTY'
   LIMIT 1;
 
+  -- Adiciona/Sobrescreve as propriedades de área
   props_orig := COALESCE(props_orig, '{}'::jsonb)
                 || jsonb_build_object(
                      'area_ha', area_ha,
-                     'area',    area_ha  -- chave extra (compatibilidade)
+                     'area',    area_ha
                    );
 
-  -- 5) Criar novo feature com MESMO layerCode = "RURAL_PROPERTY"
+  -- 4) Criar novo feature (Assumindo que f_make_feature
+  --    sabe lidar com a geometria em SRID 4674)
   feat_new := geometry_bases.f_make_feature(
                 'RURAL_PROPERTY',
                 g_imovel,
                 props_orig
               );
 
-  -- 6) Substituir no FC o layer RURAL_PROPERTY pelo validado
+  -- 5) Substituir no FC o layer RURAL_PROPERTY pelo validado
   RETURN geometry_bases.f_fc_replace_layer(p_fc, 'RURAL_PROPERTY', feat_new);
 END;
 $function$
 ;
-
-
 
 -- ===================================================================
 -- FUNÇÃO 2: Headquarter (Point)
@@ -248,7 +277,7 @@ DECLARE
 
   g_imovel geometry;
   f jsonb;
-  feats_out jsonb := '[]'::jsonb;
+  feats_out jsonb := '[]'::jsonb; -- Array de saída
 
   is_hq boolean;
   g_pt geometry;
@@ -256,6 +285,7 @@ DECLARE
   new_ft jsonb;
 BEGIN
   -- 1) Geometria do imóvel (obrigatória)
+  -- CORRETO: Reutiliza a f_get_layer_geom (que já valida e agrega)
   g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
   IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
     -- Sem imóvel, não dá pra validar HQ -> retorna o FC original
@@ -268,7 +298,8 @@ BEGIN
 
     IF NOT is_hq THEN
       -- mantém qualquer layer diferente de PROPERTY_HEADQUARTERS
-      feats_out := feats_out || jsonb_build_array(f);
+      -- CORREÇÃO: Anexa o elemento 'f' diretamente ao array 'feats_out'
+      feats_out := feats_out || f;
       CONTINUE;
     END IF;
 
@@ -285,26 +316,29 @@ BEGIN
 
     -- mantém apenas se contido no imóvel
     IF ST_Contains(g_imovel, g_pt) THEN
+      
+      -- Adiciona a nova propriedade
       props := COALESCE(f->'properties','{}'::jsonb)
                || jsonb_build_object('inside_property', true);
 
-      -- recria o feature com a mesma layerCode e propriedades originais
-      new_ft := jsonb_build_object(
-                  'type','Feature',
-                  'properties', props,
-                  'geometry', ST_AsGeoJSON(g_pt)::jsonb
+      new_ft := geometry_bases.f_make_feature(
+                  'PROPERTY_HEADQUARTERS',
+                  g_pt,  -- A geometria em 4674
+                  props
                 );
 
-      feats_out := feats_out || jsonb_build_array(new_ft);
+      -- CORREÇÃO: Anexa o elemento 'new_ft' diretamente ao array
+      feats_out := feats_out || new_ft;
     END IF;
+    -- (Se o HQ estiver fora do imóvel, ele é simplesmente ignorado)
+    
   END LOOP;
 
+  -- Reconstrói a FeatureCollection com a lista de features filtrada/validada
   RETURN jsonb_build_object('type','FeatureCollection','features',feats_out);
 END;
 $function$
 ;
-
-
 
 
 -- ===================================================================
@@ -321,7 +355,7 @@ CREATE OR REPLACE FUNCTION geometry_bases.native_vegetation(p_fc jsonb)
 AS $function$
 DECLARE
   srid_in  int := 4674;
-  srid_met int := 31983;
+  -- srid_met e g_nv_clean_m REMOVIDOS - Usaremos 'geography'
 
   -- imóvel
   g_imovel geometry;
@@ -330,7 +364,6 @@ DECLARE
   g_nv_raw     geometry;
   g_nv_clip    geometry;
   g_nv_clean   geometry;
-  g_nv_clean_m geometry;
   area_nv_ha   numeric := 0;
 
   -- recortes "obrigatórios"
@@ -340,20 +373,17 @@ DECLARE
   g_spring_pt  geometry;
   g_river_line geometry;
 
-  -- qual layer vamos preservar (preferência por REMAINING_NATIVE_VEGETATION)
   src_layer text := NULL;
-
-  -- manter exatamente as properties originais
   props_orig jsonb := '{}'::jsonb;
-
   feat_new jsonb;
 BEGIN
   -- 1) imóvel
+  -- CORREÇÃO: f_get_layer_geom já retorna geometria válida e unificada.
+  -- A sanitização (ST_Buffer) foi removida.
   g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
   IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
     RETURN p_fc;
   END IF;
-  g_imovel := ST_Buffer(ST_MakeValid(g_imovel), 0);
 
   -- 2) decidir fonte da NV e capturar suas PROPRIEDADES originais
   g_nv_raw := geometry_bases.f_get_layer_geom(p_fc, 'REMAINING_NATIVE_VEGETATION', 'POLYGON');
@@ -368,30 +398,31 @@ BEGIN
     END IF;
   END IF;
 
+  -- Captura propriedades originais
   SELECT feat->'properties'
     INTO props_orig
   FROM jsonb_array_elements(p_fc->'features') AS feat
   WHERE upper(feat->'properties'->>'layerCode') = src_layer
   LIMIT 1;
-
   props_orig := COALESCE(props_orig, '{}'::jsonb);
 
-  -- 3) recorte obrigatório ao imóvel (prioridade NV → não recorta por Agro)
-  g_nv_clip := ST_Intersection(ST_Buffer(ST_MakeValid(g_nv_raw),0), g_imovel);
+  -- 3) recorte obrigatório ao imóvel
+  -- CORREÇÃO: g_nv_raw já é válida, ST_Buffer(ST_MakeValid(...)) removido.
+  g_nv_clip := ST_Intersection(g_nv_raw, g_imovel);
   IF g_nv_clip IS NULL OR ST_IsEmpty(g_nv_clip) THEN
-    -- nenhuma NV dentro do imóvel → remove layer
     RETURN geometry_bases.f_fc_replace_layer(p_fc, src_layer, NULL);
   END IF;
 
-  -- 4) recortes por rio/lago/infra pública/nascentes/linhas de rio até 10m
+  -- 4) carregar geometrias para recorte
   g_river_poly := geometry_bases.f_get_layer_geom(p_fc, 'RIVER',         'POLYGON');
   g_lake_poly  := geometry_bases.f_get_layer_geom(p_fc, 'LAKE_LAGOON',   'POLYGON');
   g_pub_infra  := geometry_bases.f_get_layer_geom(p_fc, 'PUBLIC_INFRASTRUCTURE', 'POLYGON');
   g_spring_pt  := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_SPRING',  'POINT');
   g_river_line := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_UP_TO_10M','LINESTRING');
 
-  g_nv_clean := g_nv_clip;
+  g_nv_clean := g_nv_clip; -- Começa com a NV clipada pelo imóvel
 
+  -- 4.1) Aplicar recortes (ST_Difference)
   IF g_river_poly IS NOT NULL AND NOT ST_IsEmpty(g_river_poly) THEN
     g_nv_clean := ST_Difference(g_nv_clean, g_river_poly);
   END IF;
@@ -401,38 +432,54 @@ BEGIN
   IF g_pub_infra IS NOT NULL AND NOT ST_IsEmpty(g_pub_infra) THEN
     g_nv_clean := ST_Difference(g_nv_clean, g_pub_infra);
   END IF;
+
+  /* -----------------------------------------------------------------
+   * CORREÇÃO: Buffers de nascente e rio refeitos usando 'geography'
+   * para garantir o cálculo correto em metros, independentemente do UTM.
+   * -----------------------------------------------------------------
+  */
   IF g_spring_pt IS NOT NULL AND NOT ST_IsEmpty(g_spring_pt) THEN
     g_nv_clean := ST_Difference(
       g_nv_clean,
-      ST_Transform(ST_Buffer(ST_Transform(g_spring_pt, srid_met), 50), srid_in)  -- furo/APP da nascente (50m)
+      -- 1. Converte ponto para geography
+      -- 2. Aplica buffer de 50m (em geography)
+      -- 3. Converte o resultado de volta para geometry para o ST_Difference
+      (ST_Buffer(g_spring_pt::geography, 50))::geometry
     );
   END IF;
   IF g_river_line IS NOT NULL AND NOT ST_IsEmpty(g_river_line) THEN
     g_nv_clean := ST_Difference(
       g_nv_clean,
-      ST_Transform(ST_Buffer(ST_Transform(g_river_line, srid_met), 1), srid_in)  -- “fio d’água” (1m) para limpar tangências
+      -- Mesma lógica, mas com buffer de 1m
+      (ST_Buffer(g_river_line::geography, 1))::geometry
     );
   END IF;
 
-  -- 5) reforço de recorte ao imóvel + saneamento
-  g_nv_clean := ST_Intersection(g_nv_clean, g_imovel);
+  -- 5) saneamento final
+  -- CORREÇÃO: O segundo ST_Intersection com g_imovel (linha 98) foi removido por ser redundante.
   IF g_nv_clean IS NULL OR ST_IsEmpty(g_nv_clean) THEN
     RETURN geometry_bases.f_fc_replace_layer(p_fc, src_layer, NULL);
   END IF;
 
-  g_nv_clean    := ST_Buffer(ST_MakeValid(ST_Union(g_nv_clean)), 0);
-  g_nv_clean_m  := ST_Transform(g_nv_clean, srid_met);
-  area_nv_ha    := round((ST_Area(g_nv_clean_m)/10000.0)::numeric, 4);
+  -- Garante que a geometria final seja válida e dissolvida
+  g_nv_clean := ST_Buffer(ST_MakeValid(g_nv_clean), 0);
+
+  /* -----------------------------------------------------------------
+   * CORREÇÃO: Cálculo de área refeito usando 'geography'
+   * -----------------------------------------------------------------
+  */
+  area_nv_ha := round((ST_Area(g_nv_clean::geography)/10000.0)::numeric, 4);
 
   -- 6) substitui o layer original, preservando properties + área
   feat_new := geometry_bases.f_make_feature(
                 src_layer,      -- mantém o MESMO layerCode de entrada
-                g_nv_clean,
+                g_nv_clean,     -- geometria final limpa (em 4674)
                 props_orig || jsonb_build_object(
                   'area_ha', area_nv_ha,
                   'area',    area_nv_ha
                 )
               );
+  -- f_make_feature irá converter g_nv_clean de 4674 para 4326 para o GeoJSON final
 
   RETURN geometry_bases.f_fc_replace_layer(p_fc, src_layer, feat_new);
 END;
@@ -453,7 +500,7 @@ CREATE OR REPLACE FUNCTION geometry_bases.consolidated_area(p_fc jsonb, p_opt1 n
 AS $function$
 DECLARE
   srid_in  int := 4674;
-  srid_met int := 31983;
+  -- srid_met e g_agro_clean_m REMOVIDOS - Usaremos 'geography'
 
   g_imovel geometry;
 
@@ -461,7 +508,6 @@ DECLARE
   g_agro_raw   geometry;
   g_agro_clip  geometry;
   g_agro_clean geometry;
-  g_agro_clean_m geometry;
   area_agro_ha numeric := 0;
 
   -- Camadas para recortes
@@ -475,26 +521,26 @@ DECLARE
   -- Vegetação nativa (prioritária)
   g_nv_raw   geometry;
   g_nv_clip  geometry;
-  g_nv_union geometry;
+  g_nv_union geometry; -- Esta variável agora é 'g_nv_clip'
 
   -- Propriedades originais a preservar
   props_orig jsonb := '{}'::jsonb;
   feat_new   jsonb;
 BEGIN
   -- 1) Imóvel
+  -- CORREÇÃO: f_get_layer_geom já retorna geometria válida e unificada.
+  -- A sanitização (ST_Buffer) foi removida.
   g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
   IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
     RETURN p_fc;
   END IF;
-  g_imovel := ST_Buffer(ST_MakeValid(g_imovel), 0);
 
-  -- 2) Guardar as PROPRIEDADES ORIGINAIS da CONSOLIDATED_AREA (primeiro feature encontrado)
+  -- 2) Guardar as PROPRIEDADES ORIGINAIS
   SELECT feat->'properties'
     INTO props_orig
   FROM jsonb_array_elements(p_fc->'features') AS feat
   WHERE upper(feat->'properties'->>'layerCode') = 'CONSOLIDATED_AREA'
   LIMIT 1;
-
   props_orig := COALESCE(props_orig, '{}'::jsonb);
 
   -- 3) Agro original
@@ -504,7 +550,8 @@ BEGIN
   END IF;
 
   -- 4) Recorte obrigatório ao imóvel
-  g_agro_clip := ST_Intersection(ST_Buffer(ST_MakeValid(g_agro_raw),0), g_imovel);
+  -- CORREÇÃO: g_agro_raw já é válida, ST_Buffer(ST_MakeValid(...)) removido.
+  g_agro_clip := ST_Intersection(g_agro_raw, g_imovel);
   IF g_agro_clip IS NULL OR ST_IsEmpty(g_agro_clip) THEN
     RETURN geometry_bases.f_fc_replace_layer(p_fc, 'CONSOLIDATED_AREA', NULL);
   END IF;
@@ -515,21 +562,16 @@ BEGIN
     g_nv_raw := geometry_bases.f_get_layer_geom(p_fc, 'NATIVE_VEGETATION', 'POLYGON');
   END IF;
 
+  g_agro_clean := g_agro_clip; -- Começa com a área consolidada já clipada
+
   IF g_nv_raw IS NOT NULL AND NOT ST_IsEmpty(g_nv_raw) THEN
-    g_nv_clip := ST_Intersection(ST_Buffer(ST_MakeValid(g_nv_raw),0), g_imovel);
-    IF g_nv_clip IS NOT NULL AND NOT ST_IsEmpty(g_nv_clip) THEN
-      g_nv_union := ST_Buffer(ST_MakeValid(ST_Union(g_nv_clip)), 0);
-    ELSE
-      g_nv_union := NULL;
+    -- CORREÇÃO: Lógica simplificada. g_nv_raw já é válida e unificada.
+    -- g_nv_union agora é apenas a NV clipada pelo imóvel.
+    g_nv_union := ST_Intersection(g_nv_raw, g_imovel);
+    
+    IF g_nv_union IS NOT NULL AND NOT ST_IsEmpty(g_nv_union) THEN
+      g_agro_clean := ST_Difference(g_agro_clean, g_nv_union);
     END IF;
-  ELSE
-    g_nv_union := NULL;
-  END IF;
-
-  g_agro_clean := g_agro_clip;
-
-  IF g_nv_union IS NOT NULL AND NOT ST_IsEmpty(g_nv_union) THEN
-    g_agro_clean := ST_Difference(g_agro_clean, g_nv_union);
   END IF;
 
   -- 6) Demais recortes (rios, lagos, infra…)
@@ -552,28 +594,31 @@ BEGIN
   IF g_lake_poly IS NOT NULL AND NOT ST_IsEmpty(g_lake_poly) THEN
     g_agro_clean := ST_Difference(g_agro_clean, g_lake_poly);
   END IF;
+
   IF g_spring_pt IS NOT NULL AND NOT ST_IsEmpty(g_spring_pt) THEN
     g_agro_clean := ST_Difference(
       g_agro_clean,
-      ST_Transform(ST_Buffer(ST_Transform(g_spring_pt, srid_met), 1), srid_in)
+      (ST_Buffer(g_spring_pt::geography, 1))::geometry -- Buffer de 1m
     );
   END IF;
   IF g_river_line IS NOT NULL AND NOT ST_IsEmpty(g_river_line) THEN
     g_agro_clean := ST_Difference(
       g_agro_clean,
-      ST_Transform(ST_Buffer(ST_Transform(g_river_line, srid_met), 1), srid_in)
+      (ST_Buffer(g_river_line::geography, 1))::geometry -- Buffer de 1m
     );
   END IF;
 
   -- 7) Reforço de recorte + consolidação
-  g_agro_clean := ST_Intersection(g_agro_clean, g_imovel);
+  -- CORREÇÃO: Recorte duplo (ST_Intersection) removido por ser redundante.
   IF g_agro_clean IS NULL OR ST_IsEmpty(g_agro_clean) THEN
     RETURN geometry_bases.f_fc_replace_layer(p_fc, 'CONSOLIDATED_AREA', NULL);
   END IF;
 
-  g_agro_clean   := ST_Buffer(ST_MakeValid(ST_Union(g_agro_clean)), 0);
-  g_agro_clean_m := ST_Transform(g_agro_clean, srid_met);
-  area_agro_ha   := round( (ST_Area(g_agro_clean_m) / 10000.0)::numeric, 4 );
+  -- Aplica uma limpeza final. (ST_Union é redundante, mas ST_Buffer(ST_MakeValid) é bom)
+  g_agro_clean   := ST_Buffer(ST_MakeValid(g_agro_clean), 0);
+  
+  -- CORREÇÃO: Cálculo de área refeito usando 'geography'
+  area_agro_ha   := round( (ST_Area(g_agro_clean::geography) / 10000.0)::numeric, 4 );
 
   -- 8) Substitui o layer mantendo as properties originais + área (ha)
   feat_new := geometry_bases.f_make_feature(
@@ -581,7 +626,7 @@ BEGIN
                 g_agro_clean,
                 props_orig || jsonb_build_object(
                   'area_ha', area_agro_ha,
-                  'area',    area_agro_ha    -- chave extra de compatibilidade
+                  'area',    area_agro_ha
                 )
               );
 
@@ -598,7 +643,7 @@ $function$
 
 -- DROP FUNCTION geometry_bases.rivers_up_to_10m(jsonb, numeric, numeric);
 
-CREATE OR REPLACE FUNCTION geometry_bases.rivers_up_to_10m(p_fc jsonb, p_max_distance_m numeric DEFAULT NULL::numeric, p_stream_width_m numeric DEFAULT NULL::numeric)
+CREATE OR REPLACE FUNCTION geometry_bases.rivers_up_to_10m(p_fc jsonb, p_capture_m numeric DEFAULT NULL::numeric, p_stream_width_m numeric DEFAULT NULL::numeric)
  RETURNS jsonb
  LANGUAGE plpgsql
  STABLE
@@ -607,100 +652,55 @@ DECLARE
   srid_in  int := 4674;
   srid_met int := 31983;
 
-  -- imóvel
-  g_imovel    geometry;
-  g_imovel_m  geometry;
+  g_prop   geometry;
+  g_prop_m geometry;
 
-  -- fonte (linhas de até 10m)
-  g_line_raw      geometry;
-  g_line_m        geometry;
-  g_line_clean_m  geometry;
-  g_line_final_m  geometry;
-  g_line_final    geometry;
+  g_line_raw geometry;
+  g_line_m   geometry;
 
-  -- recortes
-  g_river_poly   geometry;
-  g_river_poly_m geometry;
-  g_lake_poly    geometry;
-  g_lake_poly_m  geometry;
-
-  -- manter EXACT props do layer original
+  feat_new jsonb;
   props_orig jsonb := '{}'::jsonb;
-  feat_new   jsonb;
 BEGIN
-  -- 1) imóvel
-  g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
-  IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
+  -- imóvel
+  g_prop := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
+  IF g_prop IS NULL OR ST_IsEmpty(g_prop) THEN
     RETURN p_fc;
   END IF;
-  g_imovel   := ST_Buffer(ST_MakeValid(g_imovel), 0);
-  g_imovel_m := ST_Transform(g_imovel, srid_met);
+  g_prop   := ST_Buffer(ST_MakeValid(g_prop), 0);
+  g_prop_m := ST_Transform(g_prop, srid_met);
 
-  -- 2) guardar as PROPRIEDADES originais de RIVER_UP_TO_10M
-  SELECT feat->'properties'
-    INTO props_orig
+  -- manter props
+  SELECT feat->'properties' INTO props_orig
   FROM jsonb_array_elements(p_fc->'features') AS feat
   WHERE upper(feat->'properties'->>'layerCode') = 'RIVER_UP_TO_10M'
   LIMIT 1;
-
   props_orig := COALESCE(props_orig, '{}'::jsonb);
 
-  -- 3) linhas fonte
+  -- fonte linear
   g_line_raw := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_UP_TO_10M', 'LINESTRING');
   IF g_line_raw IS NULL OR ST_IsEmpty(g_line_raw) THEN
-    -- não altera se não houver a camada
-    RETURN p_fc;
+    g_line_raw := geometry_bases.f_get_layer_geom(p_fc, 'RIVER', 'LINESTRING');
+  END IF;
+  IF g_line_raw IS NULL OR ST_IsEmpty(g_line_raw) THEN
+    RETURN geometry_bases.f_fc_replace_layer(p_fc, 'RIVER_UP_TO_10M', NULL);
   END IF;
 
-  -- reprojeta para métrico para limpar/topologia e (opcional) limitar distância
-  g_line_m := ST_Transform(g_line_raw, srid_met);
+  g_line_m := ST_Transform(ST_MakeValid(g_line_raw), srid_met);
 
-  IF p_max_distance_m IS NOT NULL THEN
-    g_line_m := ST_Intersection(g_line_m, ST_Buffer(g_imovel_m, p_max_distance_m));
+  -- (opcional) filtrar por proximidade ao imóvel
+  IF p_capture_m IS NOT NULL THEN
+    g_line_m := ST_Intersection(g_line_m, ST_Buffer(g_prop_m, p_capture_m));
     IF g_line_m IS NULL OR ST_IsEmpty(g_line_m) THEN
-      -- remove layer se ficou vazio
       RETURN geometry_bases.f_fc_replace_layer(p_fc, 'RIVER_UP_TO_10M', NULL);
     END IF;
   END IF;
 
-  -- 4) remover trechos que pertencem a rios largos (polígono) e lagos
-  g_river_poly := geometry_bases.f_get_layer_geom(p_fc, 'RIVER', 'POLYGON');
-  IF g_river_poly IS NOT NULL AND NOT ST_IsEmpty(g_river_poly) THEN
-    g_river_poly_m := ST_Transform(ST_Buffer(ST_MakeValid(g_river_poly),0), srid_met);
-    g_line_m := ST_Difference(g_line_m, g_river_poly_m);
-  END IF;
-
-  g_lake_poly := geometry_bases.f_get_layer_geom(p_fc, 'LAKE_LAGOON', 'POLYGON');
-  IF g_lake_poly IS NOT NULL AND NOT ST_IsEmpty(g_lake_poly) THEN
-    g_lake_poly_m := ST_Transform(ST_Buffer(ST_MakeValid(g_lake_poly),0), srid_met);
-    g_line_m := ST_Difference(g_line_m, g_lake_poly_m);
-  END IF;
-
-  -- 5) consolidar linhas (union + linemerge)
-  IF g_line_m IS NULL OR ST_IsEmpty(g_line_m) THEN
-    RETURN geometry_bases.f_fc_replace_layer(p_fc, 'RIVER_UP_TO_10M', NULL);
-  END IF;
-
-  g_line_clean_m := ST_LineMerge(ST_Union(g_line_m));
-
-  -- 6) recorte obrigatório ao imóvel (em métrico para robustez)
-  g_line_final_m := ST_Intersection(g_line_clean_m, g_imovel_m);
-  IF g_line_final_m IS NULL OR ST_IsEmpty(g_line_final_m) THEN
-    RETURN geometry_bases.f_fc_replace_layer(p_fc, 'RIVER_UP_TO_10M', NULL);
-  END IF;
-
-  -- 7) volta para 4674 e saneia
-  g_line_final := ST_Transform(g_line_final_m, srid_in);
-  g_line_final := ST_LineMerge(ST_Union(g_line_final)); -- reforço
-
-  -- 8) cria novo feature com MESMO layerCode e MESMAS properties
   feat_new := geometry_bases.f_make_feature(
-                'RIVER_UP_TO_10M',
-                g_line_final,
-                props_orig
-              );
+               'RIVER_UP_TO_10M',
+               ST_Transform(ST_LineMerge(ST_UnaryUnion(g_line_m)), srid_in),
+               props_orig || jsonb_build_object('capture_m', p_capture_m)
+             );
 
-  -- 9) substitui o layer no FC
   RETURN geometry_bases.f_fc_replace_layer(p_fc, 'RIVER_UP_TO_10M', feat_new);
 END;
 $function$
@@ -722,41 +722,26 @@ CREATE OR REPLACE FUNCTION geometry_bases.rivers_wider_than_10m(p_fc jsonb, p_ma
 AS $function$
 DECLARE
   srid_in  int := 4674;
-  srid_met int := 31983;
-
-  -- imóvel
-  g_imovel    geometry;
-  g_imovel_m  geometry;
-
-  -- fontes possíveis
-  g_river_poly     geometry;   -- 4674
-  g_river_poly_alt geometry;   -- 4674
-
-  -- escolhido
+  g_imovel   geometry;
+  g_river_poly     geometry;
+  g_river_poly_alt geometry;
   src_layer  text := NULL;
-  g_source   geometry;     -- 4674
-  g_source_m geometry;     -- 31983
+  g_source   geometry; 
+  g_near     geometry; 
+  g_final    geometry; 
+  area_ha numeric := 0;
+  props_orig jsonb := '{}'::jsonb;  
+  feat_new   jsonb; 
 
-  -- derivado
-  g_near_m     geometry;   -- opcionalmente recortado por distância
-  g_in_prop_m  geometry;   -- recorte ao imóvel (para área/relatório)
-  g_final      geometry;   -- 4674
 
-  area_ha   numeric := 0;
-
-  props_orig jsonb := '{}'::jsonb;
-  feat_new   jsonb;
-  layer_out  text;
 BEGIN
-  -- 1) Imóvel
+  -- 1) Carrega o Imóvel
   g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
   IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
     RETURN p_fc;
   END IF;
-  g_imovel   := ST_Buffer(ST_MakeValid(g_imovel), 0);
-  g_imovel_m := ST_Transform(g_imovel, srid_met);
 
-  -- 2) Fonte poligonal (preferir RIVER_WIDER_THAN_10M; senão RIVER)
+  -- 2) Identifica a fonte do Rio
   g_river_poly     := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_WIDER_THAN_10M', 'POLYGON');
   g_river_poly_alt := geometry_bases.f_get_layer_geom(p_fc, 'RIVER',               'POLYGON');
 
@@ -767,66 +752,58 @@ BEGIN
     src_layer := 'RIVER';
     g_source  := g_river_poly_alt;
   ELSE
-    -- não há rio poligonal para processar → apenas retorna o FC
-    RETURN p_fc;
+    RETURN p_fc; -- Nenhum rio poligonal encontrado
   END IF;
 
-  -- 3) Propriedades originais do layer escolhido (para herdar)
-  SELECT feat->'properties'
-    INTO props_orig
+  -- 3) Captura propriedades originais
+  SELECT feat->'properties' INTO props_orig
   FROM jsonb_array_elements(p_fc->'features') AS feat
   WHERE upper(feat->'properties'->>'layerCode') = src_layer
   LIMIT 1;
   props_orig := COALESCE(props_orig, '{}'::jsonb);
 
-  -- 4) Reprojetar e (opcional) filtrar por distância, SEM mexer no original
-  g_source_m := ST_Transform(ST_Buffer(ST_MakeValid(g_source), 0), srid_met);
-
+  -- 4) (Opcional) Filtra rios próximos ao imóvel
   IF p_max_distance_m IS NOT NULL THEN
-    -- apenas para performance/visualização; não sobrescreve o original
-    g_near_m := ST_Intersection(g_source_m, ST_Buffer(g_imovel_m, p_max_distance_m));
-    IF g_near_m IS NULL OR ST_IsEmpty(g_near_m) THEN
-      -- nada perto do imóvel: não cria derivado; retorna p_fc intacto
-      RETURN p_fc;
+    g_near := ST_Intersection(
+                g_source, 
+                (ST_Buffer(g_imovel::geography, p_max_distance_m))::geometry
+              );
+              
+    IF g_near IS NULL OR ST_IsEmpty(g_near) THEN
+      RETURN geometry_bases.f_fc_replace_layer(p_fc, src_layer, NULL);
     END IF;
   ELSE
-    g_near_m := g_source_m;
+    g_near := g_source; -- Usa todos os rios
   END IF;
 
-  -- 5) DERIVADO: recorte ao imóvel (para área/relatório)
-  g_in_prop_m := ST_Intersection(
-                   ST_Buffer(ST_MakeValid(ST_UnaryUnion(g_near_m)), 0),
-                   g_imovel_m
-                 );
-  IF g_in_prop_m IS NULL OR ST_IsEmpty(g_in_prop_m) THEN
-    -- sem interseção com o imóvel → apenas retorna p_fc intacto
-    RETURN p_fc;
+  -- 5) LÓGICA ALTERADA (NÃO RECORTA MAIS PELO IMÓVEL)
+  g_final := g_near;
+  
+  IF g_final IS NULL OR ST_IsEmpty(g_final) THEN
+    RETURN geometry_bases.f_fc_replace_layer(p_fc, src_layer, NULL);
   END IF;
 
-  area_ha := round( (ST_Area(g_in_prop_m) / 10000.0)::numeric, 4 );
+  -- 6) Saneamento final e cálculo de área
+  g_final := ST_Buffer(ST_MakeValid(g_final), 0); 
+  area_ha := round((ST_Area(g_final::geography)/10000.0)::numeric, 4);
 
-  g_final := ST_Buffer(ST_MakeValid(ST_Transform(g_in_prop_m, srid_in)), 0);
-
-  -- 6) Nome do layer derivado (não toca no original!)
-  layer_out := src_layer;
-
-  -- 7) Cria a feature derivada com as props originais + métrica
+  -- 7) Cria a nova feature
   feat_new := geometry_bases.f_make_feature(
-                layer_out,
-                g_final,
-                props_orig || jsonb_build_object(
-                  'area_ha', area_ha,
-                  'area',    area_ha,
-                  'source_layer', src_layer,
-                  'max_distance_filter_m', p_max_distance_m
-                )
-              );
+               src_layer,
+               g_final, 
+               props_orig || jsonb_build_object(
+                 'area_ha', area_ha,
+                 'area',    area_ha,
+                 'source_layer', src_layer,
+                 'max_distance_filter_m', p_max_distance_m
+               )
+             );
 
-  -- 8) Acrescenta o novo layer (não substitui o original)
-  RETURN geometry_bases.f_fc_append_one(p_fc, feat_new);
+  RETURN geometry_bases.f_fc_replace_layer(p_fc, src_layer, feat_new);
 END;
 $function$
 ;
+
 
 
 -- ===================================================================
@@ -842,7 +819,6 @@ CREATE OR REPLACE FUNCTION geometry_bases.legal_reserve(p_fc jsonb)
 AS $function$
 DECLARE
   srid_in  int := 4674;
-  srid_met int := 31983;
 
   -- parâmetros fixos
   min_rl_percent numeric := 50;
@@ -854,7 +830,6 @@ DECLARE
   -- RL
   g_rl_input geometry;
   g_rl_sel geometry;     -- 4674
-  g_rl_sel_m geometry;   -- 31983
 
   -- Hidrografia p/ recorte da RL (NÃO usar PPA)
   g_river_poly geometry;        -- RIVER (ou WIDER)
@@ -865,7 +840,7 @@ DECLARE
 
   -- Vegetação nativa (apenas métricas, sem cortar RL)
   g_nv_input geometry;
-  g_nv_in_rl_m geometry;
+  g_nv_in_rl geometry; -- Geometria de intersecção (em 4674)
 
   -- métricas
   area_imovel_m2 numeric := 0;
@@ -883,14 +858,15 @@ DECLARE
   feat_new jsonb;
 BEGIN
   -- 1) Imóvel
+  -- CORREÇÃO: f_get_layer_geom já valida e une. ST_Buffer(ST_MakeValid) removido.
   g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
   IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
     RETURN p_fc;
   END IF;
-  g_imovel := ST_Buffer(ST_MakeValid(g_imovel), 0);
 
   -- 2) Área mínima exigida
-  area_imovel_m2 := ST_Area(ST_Transform(g_imovel, srid_met));
+  -- CORREÇÃO: Cálculo de área usando 'geography' para precisão universal.
+  area_imovel_m2 := ST_Area(g_imovel::geography);
   area_req_m2    := area_imovel_m2 * (min_rl_percent / 100.0);
   required_ha    := round((area_req_m2/10000.0)::numeric, 4);
 
@@ -901,14 +877,13 @@ BEGIN
   END IF;
 
   -- 4) Recorte obrigatório ao imóvel
-  g_rl_sel := ST_Intersection(ST_Buffer(ST_MakeValid(g_rl_input),0), g_imovel);
+  -- CORREÇÃO: ST_Buffer(ST_MakeValid) removido por ser redundante.
+  g_rl_sel := ST_Intersection(g_rl_input, g_imovel);
   IF g_rl_sel IS NULL OR ST_IsEmpty(g_rl_sel) THEN
     RETURN geometry_bases.f_fc_replace_layer(p_fc, 'LEGAL_RESERVE', NULL);
   END IF;
 
-  -- 5) NÃO cortar por APP (exclude_app = false)  → ignoramos PPA_* aqui
-
-  -- 6) Cortar RL pela HIDROGRAFIA (rio/lago e rio até 10m como linha)
+  -- 6) Cortar RL pela HIDROGRAFIA
   -- 6.1) RIO poligonal
   g_river_poly     := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_WIDER_THAN_10M', 'POLYGON');
   IF g_river_poly IS NULL OR ST_IsEmpty(g_river_poly) THEN
@@ -919,25 +894,25 @@ BEGIN
   END IF;
 
   IF g_river_poly IS NOT NULL AND NOT ST_IsEmpty(g_river_poly) THEN
-    g_river_final := ST_Buffer(ST_MakeValid(ST_Union(g_river_poly)), 0);
+    -- CORREÇÃO: g_river_poly já vem unificado de f_get_layer_geom.
+    g_river_final := g_river_poly;
     g_rl_sel := ST_Difference(g_rl_sel, g_river_final);
   END IF;
 
   -- 6.2) LAGO/LAGOA poligonal
   g_lake_poly := geometry_bases.f_get_layer_geom(p_fc, 'LAKE_LAGOON', 'POLYGON');
   IF g_lake_poly IS NOT NULL AND NOT ST_IsEmpty(g_lake_poly) THEN
-    g_rl_sel := ST_Difference(g_rl_sel, ST_Buffer(ST_MakeValid(g_lake_poly),0));
+    -- CORREÇÃO: ST_Buffer(ST_MakeValid) removido.
+    g_rl_sel := ST_Difference(g_rl_sel, g_lake_poly);
   END IF;
 
-  -- 6.3) RIO ATÉ 10 m (linhas) → remover só a linha (buffer mínimo p/ diferença)
+  -- 6.3) RIO ATÉ 10 m (linhas) → remover "fio d'água"
   g_river_u10 := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_UP_TO_10M', 'LINESTRING');
   IF g_river_u10 IS NOT NULL AND NOT ST_IsEmpty(g_river_u10) THEN
+
     g_rl_sel := ST_Difference(
                   g_rl_sel,
-                  ST_Transform(
-                    ST_Buffer(ST_Transform(g_river_u10, srid_met), 1.0),  -- 1 m só para "abrir" a linha
-                    srid_in
-                  )
+                  (ST_Buffer(g_river_u10::geography, 1.0))::geometry  -- Buffer de 1m
                 );
   END IF;
 
@@ -946,12 +921,14 @@ BEGIN
     RETURN geometry_bases.f_fc_replace_layer(p_fc, 'LEGAL_RESERVE', NULL);
   END IF;
 
-  -- 7) Consolidar e garantir recorte ao imóvel
-  g_rl_sel   := ST_Intersection(ST_Buffer(ST_MakeValid(ST_Union(g_rl_sel)), 0), g_imovel);
-  g_rl_sel_m := ST_Transform(g_rl_sel, srid_met);
+  -- 7) Consolidar geometria final da RL
+  -- CORREÇÃO: Removido o ST_Intersection(..., g_imovel) redundante.
+  -- ST_Union é necessário caso ST_Difference tenha dividido a RL em múltiplos polígonos.
+  g_rl_sel   := ST_Buffer(ST_MakeValid(ST_Union(g_rl_sel)), 0);
 
   -- 8) Métricas recalculadas após cortes
-  area_sel_m2 := ST_Area(g_rl_sel_m);
+  -- CORREÇÃO: Cálculo de área usando 'geography'
+  area_sel_m2 := ST_Area(g_rl_sel::geography);
   selected_ha := round((area_sel_m2/10000.0)::numeric, 4);
 
   -- NV × RL: **NÃO** cortamos RL por NV. Apenas medimos a interseção.
@@ -961,11 +938,9 @@ BEGIN
   END IF;
 
   IF g_nv_input IS NOT NULL AND NOT ST_IsEmpty(g_nv_input) THEN
-    g_nv_in_rl_m := ST_Transform(
-                      ST_Intersection(ST_Transform(g_nv_input, srid_met), g_rl_sel_m),
-                      srid_met
-                    );
-    area_nv_rl_m2 := COALESCE(ST_Area(g_nv_in_rl_m), 0);
+    -- CORREÇÃO: Lógica de interseção e área simplificada e corrigida.
+    g_nv_in_rl := ST_Intersection(g_nv_input, g_rl_sel);
+    area_nv_rl_m2 := COALESCE(ST_Area(g_nv_in_rl::geography), 0);
     nativa_ha     := round((area_nv_rl_m2/10000.0)::numeric, 4);
   ELSE
     nativa_ha := 0;
@@ -985,16 +960,16 @@ BEGIN
                 jsonb_build_object(
                   'required_ha',   required_ha,
                   'selected_ha',   selected_ha,
-                  'nativa_ha',     nativa_ha,     -- quanto de NV coincide com RL (apenas diagnóstico)
+                  'nativa_ha',     nativa_ha,
                   'deficit_ha',    deficit_ha,
                   'meets_minimum', meets_minimum,
                   'area_ha',       selected_ha
                 );
 
-  -- 10) Substituir o layer com a RL recortada pela HIDROGRAFIA (e NÃO pela NV)
+  -- 10) Substituir o layer
   feat_new := geometry_bases.f_make_feature(
                 'LEGAL_RESERVE',
-                g_rl_sel,
+                g_rl_sel, -- Geometria final em 4674 (f_make_feature converte para 4326)
                 props_orig
               );
 
@@ -1010,126 +985,132 @@ $function$
 
 -- DROP FUNCTION geometry_bases.ppa_up_to_10m(jsonb, numeric, numeric);
 
-CREATE OR REPLACE FUNCTION geometry_bases.ppa_up_to_10m(p_fc jsonb, p_buffer_m numeric, p_max_distance_m numeric DEFAULT NULL::numeric)
+CREATE OR REPLACE FUNCTION geometry_bases.ppa_up_to_10m(p_fc jsonb, p_buffer_m numeric DEFAULT 30, p_capture_m numeric DEFAULT 80)
  RETURNS jsonb
  LANGUAGE plpgsql
  STABLE
 AS $function$
 DECLARE
   srid_in  int := 4674;
-  srid_met int := 31983;
+  g_prop      geometry;
+  g_lines     geometry;
+  g_ppa       geometry;
+  g_ppa_final geometry;
+  
+  -- Geometrias para recorte
+  g_clip_hydro_polys  geometry; -- "Buraco" 1: Rios/Lagos
+  g_clip_ppa_priority geometry; -- "Buraco" 2: APP Prioritária (calculada)
 
-  g_imovel geometry;
-  g_imovel_m geometry;
-
-  g_river_line geometry;
-  g_river_line_m geometry;
-
-  g_ppa_m geometry;
-  g_ppa_final_m geometry;
+  -- Variáveis para recalcular a PPA prioritária
+  g_river_poly_source geometry;
+  p_buffer_m_wider numeric := 50; -- Buffer padrão da PPA WIDER
 
   area_ha numeric := 0;
-  feat jsonb;
-
-  -- recorte final dos rios
-  lyr   text;
-  g_src geometry;
-  g_clip geometry;
-  props jsonb;
+  props_orig jsonb := '{}'::jsonb;
 BEGIN
-  g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
-  IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
-    RETURN p_fc;
+  g_prop := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
+  IF g_prop IS NULL OR ST_IsEmpty(g_prop) THEN RETURN p_fc; END IF;
+
+  SELECT it.feat->'properties' INTO props_orig
+  FROM jsonb_array_elements(p_fc->'features') AS it(feat)
+  WHERE upper(it.feat->'properties'->>'layerCode') = 'PPA_UP_TO_10M'
+  LIMIT 1;
+  props_orig := COALESCE(props_orig, '{}'::jsonb);
+
+  g_lines := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_UP_TO_10M', 'LINESTRING');
+  IF g_lines IS NULL OR ST_IsEmpty(g_lines) THEN
+    g_lines := geometry_bases.f_get_layer_geom(p_fc, 'RIVER', 'LINESTRING');
   END IF;
-  g_imovel   := ST_Buffer(ST_MakeValid(g_imovel), 0);
-  g_imovel_m := ST_Transform(g_imovel, srid_met);
+  IF g_lines IS NULL OR ST_IsEmpty(g_lines) THEN RETURN p_fc; END IF;
 
-  g_river_line := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_UP_TO_10M', 'LINESTRING');
-  IF g_river_line IS NULL OR ST_IsEmpty(g_river_line) THEN
-    RETURN p_fc;
-  END IF;
-
-  g_river_line_m := ST_Transform(g_river_line, srid_met);
-
-  IF p_max_distance_m IS NOT NULL THEN
-    g_river_line_m := ST_Intersection(g_river_line_m, ST_Buffer(g_imovel_m, p_max_distance_m));
-    IF g_river_line_m IS NULL OR ST_IsEmpty(g_river_line_m) THEN
+  IF p_capture_m IS NOT NULL THEN
+    IF NOT ST_DWithin(g_lines::geography, g_prop::geography, p_capture_m) THEN
       RETURN p_fc;
     END IF;
   END IF;
 
-  g_ppa_m := ST_Buffer(ST_LineMerge(ST_Union(g_river_line_m)), p_buffer_m);
-  g_ppa_final_m := ST_Intersection(g_ppa_m, g_imovel_m);
-  IF g_ppa_final_m IS NULL OR ST_IsEmpty(g_ppa_final_m) THEN
-    RETURN p_fc;
+  -- PASSO 1: Carrega e HIGIENIZA os "buracos"
+  
+  -- Buraco 1: Massas de água (Rios, Lagos)
+  g_clip_hydro_polys := ST_Union(
+      geometry_bases.f_get_layer_geom(p_fc, 'RIVER', 'POLYGON'),
+      geometry_bases.f_get_layer_geom(p_fc, 'RIVER_WIDER_THAN_10M', 'POLYGON')
+  );
+  g_clip_hydro_polys := ST_Union(
+      g_clip_hydro_polys,
+      geometry_bases.f_get_layer_geom(p_fc, 'LAKE_LAGOON', 'POLYGON')
+  );
+  
+  IF g_clip_hydro_polys IS NOT NULL THEN
+      g_clip_hydro_polys := ST_Buffer(ST_MakeValid(g_clip_hydro_polys), 0);
   END IF;
 
-  g_ppa_final_m := ST_MakeValid(ST_Union(g_ppa_final_m));
-  area_ha := round( (ST_Area(g_ppa_final_m) / 10000.0)::numeric, 4 );
+  -- Buraco 2: RECALCULA a PPA prioritária
+  g_river_poly_source := geometry_bases.f_get_layer_geom(p_fc, 'RIVER', 'POLYGON');
+  IF g_river_poly_source IS NULL OR ST_IsEmpty(g_river_poly_source) THEN
+    g_river_poly_source := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_WIDER_THAN_10M', 'POLYGON');
+  END IF;
 
-  feat := geometry_bases.f_make_feature(
+  IF g_river_poly_source IS NOT NULL AND NOT ST_IsEmpty(g_river_poly_source) THEN
+      -- 1. Cria o buffer (polígono maior)
+      g_clip_ppa_priority := (ST_Buffer(
+                               g_river_poly_source::geography,
+                               p_buffer_m_wider,
+                               'endcap=flat join=mitre mitre_limit=5.0'
+                             ))::geometry;
+                             
+      -- 2. Higieniza o buffer
+      g_clip_ppa_priority := ST_Buffer(ST_MakeValid(g_clip_ppa_priority), 0);
+      
+      -- 3. Subtrai o "furo" (rios/lagos) para criar o "donut"
+      IF g_clip_hydro_polys IS NOT NULL THEN
+        g_clip_ppa_priority := ST_Difference(g_clip_ppa_priority, g_clip_hydro_polys);
+      END IF;
+  END IF;
+
+
+  -- PASSO 2: Calcula e HIGIENIZA o Buffer da PPA Fina
+  g_ppa := (ST_Buffer(
+             ST_LineMerge(ST_UnaryUnion(g_lines))::geography,
+             p_buffer_m,
+             'endcap=flat join=mitre mitre_limit=5.0'
+           ))::geometry;
+           
+  g_ppa := ST_Buffer(ST_MakeValid(g_ppa), 0);
+
+
+  -- PASSO 3: Aplica os recortes (ST_Difference) em ETAPAS
+  
+  -- Etapa 1: Subtrai o "furo" (rios/lagos)
+  IF g_clip_hydro_polys IS NOT NULL AND NOT ST_IsEmpty(g_clip_hydro_polys) THEN
+      g_ppa := ST_Difference(g_ppa, g_clip_hydro_polys);
+  END IF;
+  
+  -- Etapa 2: Subtrai a "hierarquia" (PPA maior, recalculada)
+  IF g_clip_ppa_priority IS NOT NULL AND NOT ST_IsEmpty(g_clip_ppa_priority) THEN
+      g_ppa := ST_Difference(
+                 ST_Buffer(ST_MakeValid(g_ppa), 0), -- Higieniza o resultado da Etapa 1
+                 g_clip_ppa_priority -- Já foi higienizado ao ser criado
+               );
+  END IF;
+
+  -- PASSO 4: Recorte final ao imóvel
+  g_ppa_final := ST_Intersection(g_ppa, g_prop);
+  IF g_ppa_final IS NULL OR ST_IsEmpty(g_ppa_final) THEN RETURN p_fc; END IF;
+  
+  g_ppa_final := ST_Buffer(ST_MakeValid(g_ppa_final), 0);
+  area_ha := round((ST_Area(g_ppa_final::geography)/10000.0)::numeric, 4);
+
+  -- PASSO 5: Retorno
+  RETURN geometry_bases.f_fc_replace_layer(
+           p_fc,
            'PPA_UP_TO_10M',
-           ST_Transform(g_ppa_final_m, srid_in),
-           jsonb_build_object(
-             'area_ha', area_ha,
-             'buffer_m', p_buffer_m,
-             'max_distance_filter_m', p_max_distance_m
+           geometry_bases.f_make_feature(
+             'PPA_UP_TO_10M',
+             g_ppa_final,
+             props_orig || jsonb_build_object('area_ha', area_ha, 'area', area_ha, 'buffer_m', p_buffer_m)
            )
          );
-
-  p_fc := geometry_bases.f_fc_append_one(p_fc, feat);
-
-  -- RECORTE FINAL DOS RIOS AO IMÓVEL — trata POLYGON e LINE separadamente
-  FOR lyr IN SELECT unnest(ARRAY['RIVER_UP_TO_10M','RIVER','RIVER_WIDER_THAN_10M']) LOOP
-    g_src := geometry_bases.f_get_layer_geom(p_fc, lyr, 'POLYGON');
-    IF g_src IS NULL OR ST_IsEmpty(g_src) THEN
-      g_src := geometry_bases.f_get_layer_geom(p_fc, lyr, 'LINESTRING');
-    END IF;
-    IF g_src IS NULL OR ST_IsEmpty(g_src) THEN
-      CONTINUE;
-    END IF;
-
-    SELECT it.feat->'properties' INTO props
-    FROM jsonb_array_elements(p_fc->'features') AS it(feat)
-    WHERE upper(it.feat->'properties'->>'layerCode') = upper(lyr)
-    LIMIT 1;
-    props := COALESCE(props, '{}'::jsonb);
-
-    IF GeometryType(g_src) LIKE 'POLYGON%' OR ST_Dimension(g_src) = 2 THEN
-      g_clip := ST_Intersection(ST_Buffer(ST_MakeValid(g_src),0), g_imovel);
-      g_clip := ST_CollectionExtract(ST_MakeValid(g_clip), 3);
-      IF g_clip IS NULL OR ST_IsEmpty(g_clip) THEN
-        p_fc := geometry_bases.f_fc_replace_layer(p_fc, lyr, NULL);
-      ELSE
-        p_fc := geometry_bases.f_fc_replace_layer(
-                 p_fc, lyr,
-                 geometry_bases.f_make_feature(
-                   lyr,
-                   ST_Buffer(ST_MakeValid(g_clip),0),
-                   props
-                 )
-               );
-      END IF;
-    ELSE
-      -- LINESTRING: NUNCA dar buffer(0)
-      g_clip := ST_Intersection(ST_MakeValid(g_src), g_imovel);
-      g_clip := ST_LineMerge(ST_CollectionExtract(ST_MakeValid(g_clip), 2));
-      IF g_clip IS NULL OR ST_IsEmpty(g_clip) THEN
-        p_fc := geometry_bases.f_fc_replace_layer(p_fc, lyr, NULL);
-      ELSE
-        p_fc := geometry_bases.f_fc_replace_layer(
-                 p_fc, lyr,
-                 geometry_bases.f_make_feature(
-                   lyr,
-                   g_clip,            -- << sem buffer(0) aqui!
-                   props
-                 )
-               );
-      END IF;
-    END IF;
-  END LOOP;
-
-  RETURN p_fc;
 END;
 $function$
 ;
@@ -1139,203 +1120,86 @@ $function$
 -- FUNÇÃO 9: ppa_wider_than_10m
 -- ===================================================================
 
--- DROP FUNCTION geometry_bases.ppa_wider_than_10m(jsonb);
 
-CREATE OR REPLACE FUNCTION geometry_bases.ppa_wider_than_10m(p_fc jsonb)
+-- DROP FUNCTION geometry_bases.ppa_wider_than_10m(jsonb, numeric, numeric);
+
+CREATE OR REPLACE FUNCTION geometry_bases.ppa_wider_than_10m(p_fc jsonb, p_buffer_m numeric DEFAULT 50, p_capture_m numeric DEFAULT 80)
  RETURNS jsonb
  LANGUAGE plpgsql
  STABLE
 AS $function$
 DECLARE
   srid_in  int := 4674;
-  srid_met int := 31983;
+  g_prop      geometry;
+  g_river     geometry;
+  g_ppa       geometry;
+  g_ppa_final geometry;
+  
+  -- Geometrias para recorte
+  g_clip_hydro  geometry; -- União de rios/lagos
 
-  buffer_m numeric := 50;          -- fixo
-  max_distance_m numeric := NULL;  -- fixo
-
-  g_imovel   geometry;
-  g_imovel_m geometry;
-
-  -- hidros de entrada
-  g_hydro_poly_all geometry;
-  g_hydro_line_all geometry;
-
-  g_hydro_poly_m geometry;
-  g_hydro_line_m geometry;
-
-  -- resultado PPA
-  g_ppa_m        geometry;
-  g_ppa_final_m  geometry;
-
-  area_ha   numeric := 0;
-  geom_source text := NULL;
-
+  area_ha numeric := 0;
   props_orig jsonb := '{}'::jsonb;
-  feat_new   jsonb;
-
-  -- recorte final dos rios
-  lyr   text;
-  g_src geometry;
-  g_clip geometry;
-  props jsonb;
 BEGIN
-  -- 1) Imóvel
-  g_imovel := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
-  IF g_imovel IS NULL OR ST_IsEmpty(g_imovel) THEN
-    RETURN p_fc;
-  END IF;
-  g_imovel   := ST_Buffer(ST_MakeValid(g_imovel), 0);
-  g_imovel_m := ST_Transform(g_imovel, srid_met);
+  g_prop := geometry_bases.f_get_layer_geom(p_fc, 'RURAL_PROPERTY', 'POLYGON');
+  IF g_prop IS NULL OR ST_IsEmpty(g_prop) THEN RETURN p_fc; END IF;
 
-  -- 2) props existentes (se houver)
-  SELECT it.feat->'properties'
-    INTO props_orig
+  SELECT it.feat->'properties' INTO props_orig
   FROM jsonb_array_elements(p_fc->'features') AS it(feat)
   WHERE upper(it.feat->'properties'->>'layerCode') = 'PPA_WIDER_THAN_10M'
   LIMIT 1;
   props_orig := COALESCE(props_orig, '{}'::jsonb);
 
-  -- 3) fonte poligonal preferencial; senão linha
-  g_hydro_poly_all := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_WIDER_THAN_10M', 'POLYGON');
-  IF g_hydro_poly_all IS NULL OR ST_IsEmpty(g_hydro_poly_all) THEN
-    g_hydro_poly_all := geometry_bases.f_get_layer_geom(p_fc, 'RIVER', 'POLYGON');
+  g_river := geometry_bases.f_get_layer_geom(p_fc, 'RIVER', 'POLYGON');
+  IF g_river IS NULL OR ST_IsEmpty(g_river) THEN
+    g_river := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_WIDER_THAN_10M', 'POLYGON');
   END IF;
+  IF g_river IS NULL OR ST_IsEmpty(g_river) THEN RETURN p_fc; END IF;
 
-  IF g_hydro_poly_all IS NOT NULL AND NOT ST_IsEmpty(g_hydro_poly_all) THEN
-    g_hydro_poly_all := ST_CollectionExtract(ST_Buffer(ST_MakeValid(g_hydro_poly_all),0), 3);
-    IF g_hydro_poly_all IS NOT NULL AND NOT ST_IsEmpty(g_hydro_poly_all) THEN
-      g_hydro_poly_m := ST_Transform(
-                          ST_Buffer(
-                            ST_MakeValid(ST_UnaryUnion(g_hydro_poly_all)), 0
-                          ),
-                          srid_met
-                        );
-      IF max_distance_m IS NOT NULL THEN
-        g_hydro_poly_m := ST_Intersection(g_hydro_poly_m, ST_Buffer(g_imovel_m, max_distance_m));
-        IF g_hydro_poly_m IS NULL OR ST_IsEmpty(g_hydro_poly_m) THEN
-          g_hydro_poly_all := NULL; -- força cair no ramo de linha
-        END IF;
-      END IF;
-    ELSE
-      g_hydro_poly_all := NULL; -- força cair no ramo de linha
-    END IF;
-  END IF;
+  -- PASSO 1: Carrega geometrias de recorte (Massas d'água)
+  g_clip_hydro := ST_Union(
+                      g_river, -- O próprio rio que está sendo bufferizado
+                      geometry_bases.f_get_layer_geom(p_fc, 'LAKE_LAGOON', 'POLYGON')
+                  );
 
-  IF g_hydro_poly_all IS NULL OR ST_IsEmpty(g_hydro_poly_all) THEN
-    g_hydro_line_all := geometry_bases.f_get_layer_geom(p_fc, 'RIVER_WIDER_THAN_10M', 'LINESTRING');
-    IF g_hydro_line_all IS NULL OR ST_IsEmpty(g_hydro_line_all) THEN
-      g_hydro_line_all := geometry_bases.f_get_layer_geom(p_fc, 'RIVER', 'LINESTRING');
-    END IF;
-    IF g_hydro_line_all IS NULL OR ST_IsEmpty(g_hydro_line_all) THEN
-      RETURN p_fc;
-    END IF;
-
-    g_hydro_line_all := ST_CollectionExtract(ST_MakeValid(g_hydro_line_all), 2);
-    IF g_hydro_line_all IS NULL OR ST_IsEmpty(g_hydro_line_all) THEN
-      RETURN p_fc;
-    END IF;
-
-    g_hydro_line_m := ST_Transform(g_hydro_line_all, srid_met);
-    IF max_distance_m IS NOT NULL THEN
-      g_hydro_line_m := ST_Intersection(g_hydro_line_m, ST_Buffer(g_imovel_m, max_distance_m));
-      IF g_hydro_line_m IS NULL OR ST_IsEmpty(g_hydro_line_m) THEN
-        RETURN p_fc;
-      END IF;
-    END IF;
-
-    geom_source := 'LINESTRING';
-    g_ppa_m := ST_Buffer(
-                ST_LineMerge(ST_UnaryUnion(g_hydro_line_m)),
-                buffer_m
-              );
+  -- *** CORREÇÃO: Higieniza a geometria do "buraco" (g_clip_hydro) ***
+  IF g_clip_hydro IS NOT NULL AND NOT ST_IsEmpty(g_clip_hydro) THEN
+      g_clip_hydro := ST_Buffer(ST_MakeValid(g_clip_hydro), 0);
   ELSE
-    geom_source := 'POLYGON';
-    g_ppa_m := ST_Difference(
-                ST_Buffer(ST_Boundary(g_hydro_poly_m), buffer_m),
-                g_hydro_poly_m
-              );
+      g_clip_hydro := g_river; -- Fallback
   END IF;
 
-  IF g_ppa_m IS NULL OR ST_IsEmpty(g_ppa_m) THEN
-    RETURN p_fc;
-  END IF;
 
-  -- 6) recorte ao imóvel
-  g_ppa_final_m := ST_Intersection(
-                     ST_Buffer(ST_MakeValid(ST_UnaryUnion(g_ppa_m)), 0),
-                     g_imovel_m
-                   );
-  IF g_ppa_final_m IS NULL OR ST_IsEmpty(g_ppa_final_m) THEN
-    RETURN p_fc;
-  END IF;
+  -- PASSO 2: Calcula o Buffer da APP (baseado no POLÍGONO)
+  g_ppa := (ST_Buffer(
+              g_river::geography, -- Buffer no polígono
+              p_buffer_m,
+              'endcap=flat join=mitre mitre_limit=5.0'
+           ))::geometry;
+           
+  g_ppa := ST_Buffer(ST_MakeValid(g_ppa), 0);
 
-  area_ha := round( (ST_Area(g_ppa_final_m) / 10000.0)::numeric, 4 );
 
-  feat_new := geometry_bases.f_make_feature(
-                'PPA_WIDER_THAN_10M',
-                ST_Transform(g_ppa_final_m, srid_in),
-                props_orig || jsonb_build_object(
-                  'area_ha', area_ha,
-                  'area',    area_ha,
-                  'buffer_m', buffer_m,
-                  'geom_source', geom_source,
-                  'max_distance_filter_m', max_distance_m
-                )
-              );
+  -- PASSO 3: Aplica os recortes (ST_Difference)
+  -- Ambas as geometrias estão higienizadas, a subtração vai funcionar.
+  g_ppa := ST_Difference(g_ppa, g_clip_hydro); -- Remove a água
 
-  p_fc := geometry_bases.f_fc_replace_layer(p_fc, 'PPA_WIDER_THAN_10M', feat_new);
+  -- PASSO 4: Recorte final ao imóvel
+  g_ppa_final := ST_Intersection(g_ppa, g_prop);
+  IF g_ppa_final IS NULL OR ST_IsEmpty(g_ppa_final) THEN RETURN p_fc; END IF;
 
-  -- 8) RECORTE FINAL DOS RIOS AO IMÓVEL — trata POLYGON e LINE separadamente
-  FOR lyr IN SELECT unnest(ARRAY['RIVER','RIVER_WIDER_THAN_10M','RIVER_UP_TO_10M']) LOOP
-    g_src := geometry_bases.f_get_layer_geom(p_fc, lyr, 'POLYGON');
-    IF g_src IS NULL OR ST_IsEmpty(g_src) THEN
-      g_src := geometry_bases.f_get_layer_geom(p_fc, lyr, 'LINESTRING');
-    END IF;
-    IF g_src IS NULL OR ST_IsEmpty(g_src) THEN
-      CONTINUE;
-    END IF;
+  g_ppa_final := ST_Buffer(ST_MakeValid(g_ppa_final), 0);
+  area_ha := round((ST_Area(g_ppa_final::geography)/10000.0)::numeric, 4);
 
-    SELECT it.feat->'properties' INTO props
-    FROM jsonb_array_elements(p_fc->'features') AS it(feat)
-    WHERE upper(it.feat->'properties'->>'layerCode') = upper(lyr)
-    LIMIT 1;
-    props := COALESCE(props, '{}'::jsonb);
-
-    IF GeometryType(g_src) LIKE 'POLYGON%' OR ST_Dimension(g_src) = 2 THEN
-      g_clip := ST_Intersection(ST_Buffer(ST_MakeValid(g_src),0), g_imovel);
-      g_clip := ST_CollectionExtract(ST_MakeValid(g_clip), 3);
-      IF g_clip IS NULL OR ST_IsEmpty(g_clip) THEN
-        p_fc := geometry_bases.f_fc_replace_layer(p_fc, lyr, NULL);
-      ELSE
-        p_fc := geometry_bases.f_fc_replace_layer(
-                 p_fc, lyr,
-                 geometry_bases.f_make_feature(
-                   lyr,
-                   ST_Buffer(ST_MakeValid(g_clip),0),
-                   props
-                 )
-               );
-      END IF;
-    ELSE
-      -- LINESTRING: NUNCA dar buffer(0)
-      g_clip := ST_Intersection(ST_MakeValid(g_src), g_imovel);
-      g_clip := ST_LineMerge(ST_CollectionExtract(ST_MakeValid(g_clip), 2));
-      IF g_clip IS NULL OR ST_IsEmpty(g_clip) THEN
-        p_fc := geometry_bases.f_fc_replace_layer(p_fc, lyr, NULL);
-      ELSE
-        p_fc := geometry_bases.f_fc_replace_layer(
-                 p_fc, lyr,
-                 geometry_bases.f_make_feature(
-                   lyr,
-                   g_clip,            -- << sem buffer(0) aqui!
-                   props
-                 )
-               );
-      END IF;
-    END IF;
-  END LOOP;
-
-  RETURN p_fc;
+  RETURN geometry_bases.f_fc_replace_layer(
+           p_fc,
+           'PPA_WIDER_THAN_10M',
+           geometry_bases.f_make_feature(
+             'PPA_WIDER_THAN_10M',
+             g_ppa_final,
+             props_orig || jsonb_build_object('area_ha', area_ha, 'area', area_ha, 'buffer_m', p_buffer_m)
+           )
+         );
 END;
 $function$
 ;
