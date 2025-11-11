@@ -1,125 +1,159 @@
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script>
-  const map = L.map('map').setView([-14.235, -51.9253], 4);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:18 }).addTo(map);
-
-  const layerGroup = L.layerGroup().addTo(map);
-  const sel = document.getElementById('fileSel');
-
-  async function loadManifest() {
-    try {
-      const r = await fetch('manifest.json');
-      if (!r.ok) throw new Error(`manifest status ${r.status}`);
-      const files = await r.json();
-      console.log('manifest.json:', files);
-      sel.innerHTML = '';
-      for (const f of files) {
-        const opt = document.createElement('option');
-        opt.value = f; opt.textContent = f;
-        sel.appendChild(opt);
-      }
-      if (files.length) loadFile(files[0]);
-    } catch (e) {
-      console.error('Falha ao carregar manifest.json:', e);
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>DPG — GeoJSON Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; width: 100%; }
+    .topbar {
+      position: absolute; top:0; left:0; right:0; z-index:1000;
+      background:#111; color:#fff; padding:6px 10px;
+      font-family: system-ui, sans-serif; font-size:14px;
+      display:flex; gap:8px; align-items:center;
     }
-  }
+    select { padding:3px 6px; border:none; border-radius:4px; }
+  </style>
+</head>
+<body>
+  <!-- O contêiner do mapa PRECISA existir -->
+  <div id="map"></div>
 
-  function styleFn(f) {
-    const color = f?.properties?.color || '#3388ff';
-    const fillColor = f?.properties?.fillColor || color;
-    const weight = f?.properties?.weight ?? 2;
-    const fillOpacity = f?.properties?.fillOpacity ?? 0.4;
-    return { color, fillColor, weight, fillOpacity };
-  }
+  <div class="topbar">
+    <strong>DPG — GeoJSON Viewer</strong>
+    <span>Arquivo:</span>
+    <select id="fileSel"></select>
+  </div>
 
-  // util: varre coordenadas para bbox manual
-  function expandBboxFromCoords(coords, bbox) {
-    if (typeof coords[0] === 'number') {
-      const [lon, lat] = coords;
-      if (Number.isFinite(lon) && Number.isFinite(lat)) {
-        bbox.minLon = Math.min(bbox.minLon, lon);
-        bbox.minLat = Math.min(bbox.minLat, lat);
-        bbox.maxLon = Math.max(bbox.maxLon, lon);
-        bbox.maxLat = Math.max(bbox.maxLat, lat);
-      }
-    } else {
-      for (const c of coords) expandBboxFromCoords(c, bbox);
-    }
-  }
-  function manualBbox(geojson) {
-    const bbox = { minLon:  Infinity, minLat:  Infinity, maxLon: -Infinity, maxLat: -Infinity };
-    for (const f of (geojson.features || [])) {
-      if (f?.geometry?.coordinates) expandBboxFromCoords(f.geometry.coordinates, bbox);
-    }
-    if ([bbox.minLon,bbox.minLat,bbox.maxLon,bbox.maxLat].some(v => !Number.isFinite(v))) return null;
-    return bbox;
-  }
-
-  async function loadFile(name) {
-    console.log('Carregando:', name);
-
-    // ---- FETCH com diagnóstico antes do parse ----
-    const resp = await fetch(name);
-    console.log('fetch status:', resp.status, resp.statusText);
-    console.log('content-type:', resp.headers.get('content-type'));
-    const text = await resp.text();
-    console.log('first 200 chars:', text.slice(0, 200));
-
-    if (!resp.ok) {
-      console.error('Resposta não OK, abortando render.');
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+  document.addEventListener('DOMContentLoaded', async () => {
+    // Garante que o contêiner existe
+    const mapDiv = document.getElementById('map');
+    if (!mapDiv) {
+      console.error('DIV #map não encontrado no DOM.');
       return;
     }
 
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      console.error('Falha ao fazer JSON.parse do arquivo:', e);
-      return;
-    }
-    // ----------------------------------------------
+    const map = L.map('map').setView([-14.235, -51.9253], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:18 }).addTo(map);
 
-    console.log('FeatureCollection.features:', data?.features?.length ?? 0);
+    const layerGroup = L.layerGroup().addTo(map);
+    const sel = document.getElementById('fileSel');
 
-    layerGroup.clearLayers();
-    const gj = L.geoJSON(data, {
-      style: styleFn,
-      pointToLayer: (f, latlng) => L.circleMarker(latlng, {
-        radius: f?.properties?.radius ?? 6,
-        color: f?.properties?.color || '#FFD700',
-        weight: 2,
-        fillOpacity: 0.9
-      })
-    }).addTo(layerGroup);
-
-    console.log('layers adicionadas:', gj.getLayers().length);
-
-    // tenta bounds via Leaflet
-    let bounds = gj.getBounds();
-    console.log('bounds Leaflet:', bounds);
-
-    // se inválido, bbox manual
-    if (!bounds || !bounds.isValid()) {
-      const bb = manualBbox(data);
-      console.log('bbox manual:', bb);
-      if (bb) {
-        const sw = L.latLng(bb.minLat, bb.minLon);
-        const ne = L.latLng(bb.maxLat, bb.maxLon);
-        bounds = L.latLngBounds(sw, ne);
+    async function loadManifest() {
+      try {
+        const r = await fetch('manifest.json');
+        if (!r.ok) throw new Error(`manifest status ${r.status}`);
+        const files = await r.json();
+        console.log('manifest.json:', files);
+        sel.innerHTML = '';
+        for (const f of files) {
+          const opt = document.createElement('option');
+          opt.value = f; opt.textContent = f;
+          sel.appendChild(opt);
+        }
+        if (files.length) loadFile(files[0]);
+      } catch (e) {
+        console.error('Falha ao carregar manifest.json:', e);
       }
     }
 
-    if (bounds && bounds.isValid()) {
-      const sw = bounds.getSouthWest();
-      const ne = bounds.getNorthEast();
-      if (sw.equals(ne)) map.setView(bounds.getCenter(), 15);
-      else map.fitBounds(bounds, { padding: [40, 40] });
-    } else {
-      console.warn('Nenhuma geometria válida; usando Brasil');
-      map.setView([-14.235,-51.9253], 4);
+    function styleFn(f) {
+      const color = f?.properties?.color || '#3388ff';
+      const fillColor = f?.properties?.fillColor || color;
+      const weight = f?.properties?.weight ?? 2;
+      const fillOpacity = f?.properties?.fillOpacity ?? 0.4;
+      return { color, fillColor, weight, fillOpacity };
     }
-  }
 
-  sel.addEventListener('change', e => loadFile(e.target.value));
-  loadManifest();
-</script>
+    // util: varre coordenadas para bbox manual
+    function expandBboxFromCoords(coords, bbox) {
+      if (typeof coords[0] === 'number') {
+        const [lon, lat] = coords;
+        if (Number.isFinite(lon) && Number.isFinite(lat)) {
+          bbox.minLon = Math.min(bbox.minLon, lon);
+          bbox.minLat = Math.min(bbox.minLat, lat);
+          bbox.maxLon = Math.max(bbox.maxLon, lon);
+          bbox.maxLat = Math.max(bbox.maxLat, lat);
+        }
+      } else {
+        for (const c of coords) expandBboxFromCoords(c, bbox);
+      }
+    }
+    function manualBbox(geojson) {
+      const bbox = { minLon:  Infinity, minLat:  Infinity, maxLon: -Infinity, maxLat: -Infinity };
+      for (const f of (geojson.features || [])) {
+        if (f?.geometry?.coordinates) expandBboxFromCoords(f.geometry.coordinates, bbox);
+      }
+      if ([bbox.minLon,bbox.minLat,bbox.maxLon,bbox.maxLat].some(v => !Number.isFinite(v))) return null;
+      return bbox;
+    }
+
+    async function loadFile(name) {
+      console.log('Carregando:', name);
+
+      // FETCH com diagnóstico
+      const resp = await fetch(name);
+      console.log('fetch status:', resp.status, resp.statusText);
+      console.log('content-type:', resp.headers.get('content-type'));
+      const text = await resp.text();
+      console.log('first 200 chars:', text.slice(0,200));
+
+      if (!resp.ok) {
+        console.error('Resposta não OK, abortando render.');
+        return;
+      }
+
+      let data;
+      try { data = JSON.parse(text); }
+      catch (e) { console.error('Falha ao fazer JSON.parse do arquivo:', e); return; }
+
+      console.log('FeatureCollection.features:', data?.features?.length ?? 0);
+
+      layerGroup.clearLayers();
+      const gj = L.geoJSON(data, {
+        style: styleFn,
+        pointToLayer: (f, latlng) => L.circleMarker(latlng, {
+          radius: f?.properties?.radius ?? 6,
+          color: f?.properties?.color || '#FFD700',
+          weight: 2, fillOpacity: 0.9
+        })
+      }).addTo(layerGroup);
+
+      console.log('layers adicionadas:', gj.getLayers().length);
+
+      // tenta bounds via Leaflet
+      let bounds = gj.getBounds();
+      console.log('bounds Leaflet:', bounds);
+
+      // se inválido, bbox manual
+      if (!bounds || !bounds.isValid()) {
+        const bb = manualBbox(data);
+        console.log('bbox manual:', bb);
+        if (bb) {
+          const sw = L.latLng(bb.minLat, bb.minLon);
+          const ne = L.latLng(bb.maxLat, bb.maxLon);
+          bounds = L.latLngBounds(sw, ne);
+        }
+      }
+
+      if (bounds && bounds.isValid()) {
+        const sw = bounds.getSouthWest();
+        const ne = bounds.getNorthEast();
+        if (sw.equals(ne)) map.setView(bounds.getCenter(), 15);
+        else map.fitBounds(bounds, { padding: [40, 40] });
+      } else {
+        console.warn('Nenhuma geometria válida; usando Brasil');
+        map.setView([-14.235,-51.9253], 4);
+      }
+    }
+
+    sel.addEventListener('change', e => loadFile(e.target.value));
+    loadManifest();
+  });
+  </script>
+</body>
+</html>
