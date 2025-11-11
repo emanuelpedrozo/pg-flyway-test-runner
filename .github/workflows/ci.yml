@@ -79,28 +79,53 @@ jobs:
 
       # ====== Normaliza e valida JSONs fora do container ======
       - name: Normalizar e validar JSONs (gera *_result.json)
+        shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
           for raw in tests_output/*_raw.json; do
             base="$(basename "$raw" _raw.json)"
-            echo "==> Limpando $raw -> ${base}_result.json"
+            out="tests_output/${base}_result.json"
+            echo "==> Limpando $raw -> $out"
 
-            # 1) remove CR (Windows)
-            # 2) remove linhas que, após trim, são apenas "+"
-            # 3) valida/minifica com Python (falha se JSON inválido)
-            sed -e 's/\r$//' "$raw" \
-            | awk '{
-                t=$0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t);
-                if (t=="+") next;
-                print $0;
-              }' \
-            | python3 -c 'import sys,json; data=sys.stdin.read(); print(json.dumps(json.loads(data), ensure_ascii=False))' \
-              > "tests_output/${base}_result.json"
-          done
+            # 1) remove CR (\r) de Windows
+            # 2) descarta linhas que são apenas "+"
+            # 3) remove qualquer '+' no final da linha (com espaços)
+            cleaned="$(
+              sed -e 's/\r$//' "$raw" \
+              | awk '{
+                  t=$0; gsub(/^[ \t]+|[ \t]+$/, "", t);
+                  if (t=="+") next;
+                  print;
+                }' \
+              | sed -E 's/[[:space:]]*\+[[:space:]]*$//'
+            )"
 
-          echo "Arquivos finais:"
-          ls -lah tests_output/*_result.json
+            # Se ficou vazio depois da limpeza, falha com diagnóstico
+            if [ -z "${cleaned}" ]; then
+              echo "::error file=${raw}::Arquivo ficou vazio após limpeza. Primeiras linhas brutas:"
+              head -n 20 "$raw" || true
+              exit 1
+            fi
+
+            # Valida e grava o JSON. Falha se inválido (mostra um trecho)
+            printf '%s' "${cleaned}" \
+              | OUT="$out" python3 -c 'import os, sys, json
+          data = sys.stdin.read().strip()
+          try:
+              obj = json.loads(data)
+          except Exception:
+              print("=== JSON inválido. Primeiros 300 chars após limpeza ===")
+              print(data[:300])
+              raise
+          out = os.environ["OUT"]
+          with open(out, "w", encoding="utf-8") as f:
+              f.write(json.dumps(obj, ensure_ascii=False))
+          print(f"[ok] gravado: {out}")'
+                    done
+
+                    echo "Arquivos finais:"
+                    ls -lah tests_output/*_result.json
 
       - name: Upload dos artefatos de testes (.json)
         uses: actions/upload-artifact@v4
