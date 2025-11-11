@@ -51,82 +51,74 @@ jobs:
           flyway info
 
       # ====== TESTES: gera saída "crua" dentro do container ======
-      - name: Rodar TODOS os testes SQL (gera RAW)
+      - name: Rodar TODOS os testes SQL (gera arquivos via \g)
         env:
           PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
           set -euo pipefail
           mkdir -p tests_output
-
-          uid="$(id -u)"
-          gid="$(id -g)"
-
           docker run --rm --network host \
-            --user "${uid}:${gid}" \
             -e PGPASSWORD="${PGPASSWORD}" \
-            -v "${{ github.workspace }}/tests:/tests" \
+            -v "${{ github.workspace }}/tests:/tests:ro" \
             -v "${{ github.workspace }}/tests_output:/tests_output" \
             postgres:16 \
             sh -lc 'set -euo pipefail;
-              ls -1 /tests/*.sql 2>/dev/null | while read -r f; do
-                base="$(basename "$f" .sql)";
-                echo "==> Executando $base.sql";
-                psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
-                     -h localhost -p 5432 -U postgres -d dpg_dev \
-                     -f "$f" > "/tests_output/${base}_raw.json";
-              done;
-              echo "Arquivos RAW em /tests_output:"; ls -lah /tests_output'
+              for f in /tests/*.sql; do
+                echo "==> Executando $(basename "$f")";
+                # Sem redirecionar para RAW. Se o .sql usar \g, ele escreverá direto em /tests_output
+                psql -X -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
+                    -h localhost -p 5432 -U postgres -d dpg_dev -f "$f";
+              done'
 
       # ====== Normaliza e valida JSONs fora do container ======
       - name: Normalizar e validar JSONs (gera *_result.json)
-        shell: bash
         run: |
           set -euo pipefail
+          cd tests_output
+
           shopt -s nullglob
+          # Se existir *_raw.json (para futuros testes que não usam \g), tratamos.
+          for raw in *_raw.json; do
+            base="${raw%_raw.json}"
+            res="${base}_result.json"
 
-          echo "Listando arquivos RAW gerados:"
-          ls -lah tests_output || true
-
-          for raw in tests_output/*_raw.json; do
-            base="$(basename "$raw" _raw.json)"
-            out="tests_output/${base}_result.json"
-            echo ""
-            echo "==> Processando $raw -> $out"
-
-            echo "Tamanho (bytes): $(wc -c < "$raw" || echo 0)"
-            echo "Primeiras linhas (visíveis) do RAW:"
-            sed -n '1,20p' "$raw" | sed -n 's/[[:cntrl:]]/\\n/g; s/$/$/p' || true
-
-            # Limpeza: remove CR, remove linhas que são apenas '+', remove '+' no fim da linha
-            cleaned="$(
-              sed -e 's/\r$//' "$raw" \
-              | awk '{
-                  t=$0; gsub(/^[ \t]+|[ \t]+$/, "", t);
-                  if (t=="+") next;
-                  print;
-                }' \
-              | sed -E 's/[[:space:]]*\+[[:space:]]*$//'
-            )"
-
-            if [ -z "${cleaned}" ]; then
-              echo "::warning file=${raw}::Após limpeza ficou vazio. Vou copiar o RAW para ${out} para diagnóstico."
-              cp -f "$raw" "$out" || true
+            if [[ -s "$res" ]]; then
+              echo "[info] $res já existe (gerado via \\g). Não vou sobrescrever."
               continue
             fi
 
-            # ✅ Validação simples: here-string apenas (sem heredoc)
-            if python3 -c 'import sys, json; json.loads(sys.stdin.read())' <<<"$cleaned"; then
-              printf '%s' "${cleaned}" > "$out"
-              echo "[ok] JSON válido gravado: $out"
-            else
-              echo "::warning file=${raw}::Conteúdo não é JSON válido. Salvando mesmo assim em ${out} para inspeção."
-              printf '%s' "${cleaned}" > "$out"
+            if [[ ! -s "$raw" ]]; then
+              echo "::warning ::$raw está vazio e $res não existe. Nada para publicar."
+              continue
             fi
-          done
 
-          echo ""
-          echo "Arquivos finais em tests_output/:"
-          ls -lah tests_output
+            awk '{
+              gsub("\r","")
+              if ($0 ~ /^[[:space:]]*\+[[:space:]]*$/) next
+              sub(/[[:space:]]+$/,"")
+              print
+            }' "$raw" > "$res"
+
+            python - <<'PY'
+          import json,sys
+          p=sys.argv[1]
+          with open(p,'r',encoding='utf-8') as f: json.load(f)
+          print(f"[ok] JSON válido: {p}")
+          PY
+                "$res"
+              done
+
+          # Caso só exista arquivo gerado via \g (nenhum *_raw.json), apenas valide-os.
+          for res in *_result.json; do
+            [ -s "$res" ] || continue
+            python - <<'PY'
+          import json,sys
+          p=sys.argv[1]
+          with open(p,'r',encoding='utf-8') as f: json.load(f)
+          print(f"[ok] JSON válido: {p}")
+          PY
+                "$res"
+              done
 
 
       - name: Upload dos artefatos de testes (.json)
