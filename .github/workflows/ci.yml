@@ -93,15 +93,12 @@ jobs:
                 if (t=="+") next;
                 print $0;
               }' \
-            | python3 - <<'PY' > "tests_output/${base}_result.json"
-              import sys, json
-              data = sys.stdin.read()
-              print(json.dumps(json.loads(data), ensure_ascii=False))
-              PY
-              done
+            | python3 -c 'import sys,json; data=sys.stdin.read(); print(json.dumps(json.loads(data), ensure_ascii=False))' \
+              > "tests_output/${base}_result.json"
+          done
 
-              echo "Arquivos finais:"
-              ls -lah tests_output/*_result.json
+          echo "Arquivos finais:"
+          ls -lah tests_output/*_result.json
 
       - name: Upload dos artefatos de testes (.json)
         uses: actions/upload-artifact@v4
