@@ -187,8 +187,10 @@ jobs:
           HTML
 
       - name: Publicar viewer no GitHub Pages
-        if: ${{ github.ref == 'refs/heads/main' }}
+        if: ${{ hashFiles('viewer/**') != '' }}  # publica se existir QUALQUER arquivo em viewer/
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./viewer
+          commit_message: "deploy: viewer (${{ github.sha }})"
+
