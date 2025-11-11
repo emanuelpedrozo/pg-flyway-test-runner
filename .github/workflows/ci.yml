@@ -81,20 +81,26 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p viewer
+
+          # copia resultados gerados pelos testes
           cp tests_output/*.json viewer/ 2>/dev/null || true
 
-          # Gera manifest.json com os nomes dos arquivos
-          echo '[' > viewer/manifest.json
-          sep=''
-          for f in viewer/*.json; do
-            [ -e "$f" ] || continue
-            bn="$(basename "$f")"
-            printf "%s  \"%s\"\n" "$sep" "$bn" >> viewer/manifest.json
-            sep=','
-          done
-          echo ']' >> viewer/manifest.json
+          # lista apenas .json válidos (exclui manifest.json)
+          mapfile -t files < <(find viewer -maxdepth 1 -type f -name '*.json' ! -name 'manifest.json' -printf '%f\n' || true)
 
-          # Copia o template HTML para a pasta do viewer
+          # debug no log
+          echo "Arquivos para o viewer:" "${files[@]:-<nenhum>}"
+
+          # se não houver json, não gera manifest e deixa o próximo step pular
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "Nenhum JSON copiado para viewer/. Verifique o step de testes."
+            exit 0
+          fi
+
+          # gera manifest.json com os nomes dos arquivos
+          printf '%s\n' "${files[@]}" | jq -R . | jq -s . > viewer/manifest.json
+
+          # usa o template HTML
           cp .github/viewer_template.html viewer/index.html
 
       - name: Publicar viewer no GitHub Pages
