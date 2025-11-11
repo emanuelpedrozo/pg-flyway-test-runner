@@ -1,143 +1,70 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
+<!doctype html>
+<html lang="pt-br">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>DPG — GeoJSON Viewer</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
-    html, body { height: 100%; margin: 0; }
-    #map { height: 100%; width: 100%; }
-    .topbar {
-      position: absolute; top:0; left:0; right:0; z-index:1000;
-      background:#111; color:#fff; padding:6px 10px;
-      font-family: system-ui, sans-serif; font-size:14px;
-      display:flex; gap:8px; align-items:center;
-    }
-    select { padding:3px 6px; border:none; border-radius:4px; }
+    html,body,#map{height:100%;margin:0}
+    .topbar{position:absolute;left:8px;top:8px;z-index:1000;background:#111;color:#fff;padding:6px 8px;border-radius:6px;font:14px/1.2 system-ui}
+    .topbar select{margin-left:6px}
   </style>
 </head>
 <body>
-  <div id="map"></div>
-
   <div class="topbar">
     <strong>DPG — GeoJSON Viewer</strong>
-    <span>Arquivo:</span>
-    <select id="fileSel"></select>
+    <label> Arquivo:
+      <select id="fileSel"></select>
+    </label>
   </div>
+  <div id="map"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-  document.addEventListener('DOMContentLoaded', async () => {
-    const mapDiv = document.getElementById('map');
-    if (!mapDiv) { console.error('DIV #map não encontrado.'); return; }
-
-    const map = L.map('map').setView([-14.235, -51.9253], 4);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:18 }).addTo(map);
-
+    const map = L.map('map').setView([-14.2350,-51.9253], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      {maxZoom: 18, attribution: '&copy; OpenStreetMap'}).addTo(map);
     const layerGroup = L.layerGroup().addTo(map);
     const sel = document.getElementById('fileSel');
 
-    async function loadManifest() {
-      try {
-        const r = await fetch('manifest.json');
-        if (!r.ok) throw new Error(`manifest status ${r.status}`);
-        const files = await r.json();
-        sel.innerHTML = '';
-        for (const f of files) {
-          const opt = document.createElement('option');
-          opt.value = f; opt.textContent = f;
-          sel.appendChild(opt);
-        }
-        if (files.length) loadFile(files[0]);
-      } catch (e) {
-        console.error('Falha ao carregar manifest.json:', e);
+    async function loadManifest(){
+      const files = await fetch('manifest.json').then(r=>r.json());
+      sel.innerHTML = '';
+      for (const f of files){
+        const opt = document.createElement('option');
+        opt.value = f; opt.textContent = f;
+        sel.appendChild(opt);
       }
+      if (files.length) loadFile(files[0]);
     }
 
-    function styleFn(f) {
-      const color = f?.properties?.color || '#3388ff';
-      const fillColor = f?.properties?.fillColor || color;
-      const weight = f?.properties?.weight ?? 2;
-      const fillOpacity = f?.properties?.fillOpacity ?? 0.4;
-      return { color, fillColor, weight, fillOpacity };
-    }
-
-    function expandBboxFromCoords(coords, bbox) {
-      if (typeof coords[0] === 'number') {
-        const [lon, lat] = coords;
-        if (Number.isFinite(lon) && Number.isFinite(lat)) {
-          bbox.minLon = Math.min(bbox.minLon, lon);
-          bbox.minLat = Math.min(bbox.minLat, lat);
-          bbox.maxLon = Math.max(bbox.maxLon, lon);
-          bbox.maxLat = Math.max(bbox.maxLat, lat);
-        }
-      } else {
-        for (const c of coords) expandBboxFromCoords(c, bbox);
-      }
-    }
-    function manualBbox(geojson) {
-      const bbox = { minLon:  Infinity, minLat:  Infinity, maxLon: -Infinity, maxLat: -Infinity };
-      for (const f of (geojson.features || [])) {
-        if (f?.geometry?.coordinates) expandBboxFromCoords(f.geometry.coordinates, bbox);
-      }
-      if ([bbox.minLon,bbox.minLat,bbox.maxLon,bbox.maxLat].some(v => !Number.isFinite(v))) return null;
-      return bbox;
-    }
-
-    async function loadFile(name) {
+    async function loadFile(name){
       console.log('Carregando:', name);
-
-      const resp = await fetch(name);
-      console.log('fetch status:', resp.status, resp.statusText);
-      console.log('content-type:', resp.headers.get('content-type'));
-      const text = await resp.text();
-      console.log('first 200 chars:', text.slice(0,200));
-
-      if (!resp.ok) { console.error('Resposta não OK.'); return; }
-
-      // limpeza defensiva: remove linhas que sejam só "+" e CR
-      let cleaned = text.replace(/^[ \t]*\+[ \t]*$/gm, '').replace(/\r/g, '');
-
+      const res = await fetch(name);
+      const text = await res.text();
       let data;
-      try {
-        data = JSON.parse(cleaned);
-      } catch (e) {
-        console.error('Falha ao fazer JSON.parse do arquivo:', e);
-        return;
-      }
+      // Aceita JSON com ou sem pretty e sem “+” no início das linhas
+      const clean = text.replace(/^\s*\+\s?/mg, '').trim();
+      data = JSON.parse(clean);
 
       layerGroup.clearLayers();
       const gj = L.geoJSON(data, {
-        style: styleFn,
-        pointToLayer: (f, latlng) => L.circleMarker(latlng, {
-          radius: f?.properties?.radius ?? 6,
-          color: f?.properties?.color || '#FFD700',
-          weight: 2, fillOpacity: 0.9
-        })
-      }).addTo(layerGroup);
-
-      let bounds = gj.getBounds();
-      if (!bounds || !bounds.isValid()) {
-        const bb = manualBbox(data);
-        if (bb) {
-          bounds = L.latLngBounds(L.latLng(bb.minLat, bb.minLon), L.latLng(bb.maxLat, bb.maxLon));
+        style: f => (f.properties && f.properties.rules && f.properties.rules.style) || {},
+        pointToLayer: (f, latlng) => {
+          const p = f.properties || {};
+          const r = (p.rules && p.rules.style) || {};
+          const radius = r.radius || 6;
+          const fillColor = r.fillColor || p.fillColor || '#3388ff';
+          const color = r.color || p.color || '#3388ff';
+          return L.circleMarker(latlng, {radius, fillColor, color, weight: r.weight||2, opacity: r.opacity||1, fillOpacity: r.fillOpacity||0.6});
         }
-      }
-
-      if (bounds && bounds.isValid()) {
-        const sw = bounds.getSouthWest();
-        const ne = bounds.getNorthEast();
-        if (sw.equals(ne)) map.setView(bounds.getCenter(), 15);
-        else map.fitBounds(bounds, { padding: [40, 40] });
-      } else {
-        map.setView([-14.235,-51.9253], 4);
-      }
+      }).addTo(layerGroup);
+      if (gj.getLayers().length) map.fitBounds(gj.getBounds(), {maxZoom: 15});
     }
 
     sel.addEventListener('change', e => loadFile(e.target.value));
     loadManifest();
-  });
   </script>
 </body>
 </html>
