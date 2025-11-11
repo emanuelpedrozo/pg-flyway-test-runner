@@ -52,22 +52,33 @@ jobs:
         env:
           PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
+          set -euo pipefail
           mkdir -p tests_output
           docker run --rm --network host \
             -e PGPASSWORD="${PGPASSWORD}" \
-            -v "${{ github.workspace }}/tests:/tests" \
+            -v "${{ github.workspace }}/tests:/tests:ro" \
             -v "${{ github.workspace }}/tests_output:/tests_output" \
-            postgres:16 \
-            sh -lc 'set -euo pipefail;
-              ls -1 /tests/*.sql 2>/dev/null | while read -r f; do
-                base="$(basename "$f" .sql)";
-                echo "==> Executando $base.sql";
+            postgres:16 sh -lc '
+              set -euo pipefail
+              apt-get update >/dev/null 2>&1 || true
+              apt-get install -y jq >/dev/null 2>&1 || true
+              for f in /tests/*.sql; do
+                [ -e "$f" ] || continue
+                base="$(basename "$f" .sql)"
+                echo "==> Executando $base.sql"
+                # Executa o SQL e normaliza a saída:
+                #  - remove linhas que são apenas "+" (ou espaços +)
+                #  - remove espaços finais
+                #  - faz parse + regrava JSON via jq (garante JSON válido)
                 psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
                      -h localhost -p 5432 -U postgres -d dpg_dev \
-                     -f "$f" > "/tests_output/${base}_result.json";
-              done;
-              echo "Arquivos gerados em /tests_output:"; ls -lah /tests_output'
-
+                     -f "$f" \
+                | sed -e "s/[[:space:]]\+$//" -e "/^[[:space:]]*+[[:space:]]*$/d" \
+                | jq -c . > "/tests_output/${base}_result.json"
+              done
+              echo "Arquivos gerados em /tests_output:"
+              ls -lah /tests_output
+            '
       - name: Upload dos artefatos de testes (.json)
         uses: actions/upload-artifact@v4
         with:
