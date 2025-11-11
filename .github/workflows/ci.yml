@@ -95,7 +95,6 @@ jobs:
 
             echo "Tamanho (bytes): $(wc -c < "$raw" || echo 0)"
             echo "Primeiras linhas (visíveis) do RAW:"
-            # Mostra caracteres de controle (\r, \t etc.) com o final de linha marcado por $
             sed -n '1,20p' "$raw" | sed -n 's/[[:cntrl:]]/\\n/g; s/$/$/p' || true
 
             # Limpeza: remove CR, remove linhas que são apenas '+', remove '+' no fim da linha
@@ -115,17 +114,13 @@ jobs:
               continue
             fi
 
-            # Tenta validar como JSON; se falhar, grava mesmo assim e segue (para você inspecionar)
-            if python3 - <<'PY' <<<"$cleaned"; then
-          import sys, json
-          json.loads(sys.stdin.read())
-          PY
-          then
-          printf '%s' "${cleaned}" > "$out"
-          echo "[ok] JSON válido gravado: $out"
-          else
-          echo "::warning file=${raw}::Conteúdo não é JSON válido. Salvando mesmo assim em ${out} para inspeção."
-          printf '%s' "${cleaned}" > "$out"
+            # ✅ Validação simples: here-string apenas (sem heredoc)
+            if python3 -c 'import sys, json; json.loads(sys.stdin.read())' <<<"$cleaned"; then
+              printf '%s' "${cleaned}" > "$out"
+              echo "[ok] JSON válido gravado: $out"
+            else
+              echo "::warning file=${raw}::Conteúdo não é JSON válido. Salvando mesmo assim em ${out} para inspeção."
+              printf '%s' "${cleaned}" > "$out"
             fi
           done
 
