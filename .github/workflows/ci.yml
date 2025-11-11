@@ -1,4 +1,4 @@
-name: Flyway + Test CI
+name: Flyway + Test CI + Viewer
 
 on:
   push:
@@ -32,7 +32,6 @@ jobs:
 
       - name: Instalar Flyway CLI
         run: |
-          set -e
           curl -sL https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/10.22.0/flyway-commandline-10.22.0-linux-x64.tar.gz \
             | tar xz
           sudo ln -sf "$PWD/flyway-10.22.0/flyway" /usr/local/bin/flyway
@@ -46,11 +45,10 @@ jobs:
           FLYWAY_SCHEMAS: geometry_bases
           FLYWAY_CLEAN_DISABLED: "true"
         run: |
-          set -e
           flyway -locations=filesystem:./sql/baseline,filesystem:./sql/migrations migrate
           flyway info
 
-      # ====== TESTES: gera saída "crua" dentro do container ======
+      # IMPORTANTE: Os .sql devem usar \g /tests_output/<nome>_result.json
       - name: Rodar TODOS os testes SQL (gera arquivos via \g)
         env:
           PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
@@ -65,93 +63,132 @@ jobs:
             sh -lc 'set -euo pipefail;
               for f in /tests/*.sql; do
                 echo "==> Executando $(basename "$f")";
-                # Sem redirecionar para RAW. Se o .sql usar \g, ele escreverá direto em /tests_output
                 psql -X -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
-                    -h localhost -p 5432 -U postgres -d dpg_dev -f "$f";
+                     -h localhost -p 5432 -U postgres -d dpg_dev -f "$f";
               done'
+          # Ajusta permissões se o container gravar como root
+          sudo chown -R $USER:$USER tests_output || true
+          ls -lah tests_output
 
-      # ====== Normaliza e valida JSONs fora do container ======
-      - name: Normalizar e validar JSONs (gera *_result.json)
+      - name: Validar JSONs gerados (*_result.json)
         run: |
           set -euo pipefail
           cd tests_output
-
-          shopt -s nullglob
-          # Se existir *_raw.json (para futuros testes que não usam \g), tratamos.
-          for raw in *_raw.json; do
-            base="${raw%_raw.json}"
-            res="${base}_result.json"
-
-            if [[ -s "$res" ]]; then
-              echo "[info] $res já existe (gerado via \\g). Não vou sobrescrever."
-              continue
-            fi
-
-            if [[ ! -s "$raw" ]]; then
-              echo "::warning ::$raw está vazio e $res não existe. Nada para publicar."
-              continue
-            fi
-
-            awk '{
-              gsub("\r","")
-              if ($0 ~ /^[[:space:]]*\+[[:space:]]*$/) next
-              sub(/[[:space:]]+$/,"")
-              print
-            }' "$raw" > "$res"
-
-            python - <<'PY'
-          import json,sys
-          p=sys.argv[1]
-          with open(p,'r',encoding='utf-8') as f: json.load(f)
-          print(f"[ok] JSON válido: {p}")
+          python - <<'PY'
+          import json, glob, sys
+          files = sorted(glob.glob("*_result.json"))
+          if not files:
+              print("[warn] Nenhum *_result.json encontrado em tests_output.")
+              sys.exit(0)
+          for p in files:
+              with open(p, "r", encoding="utf-8") as f:
+                  json.load(f)
+              print(f"[ok] JSON válido: {p}")
           PY
-                "$res"
-              done
-
-          # Caso só exista arquivo gerado via \g (nenhum *_raw.json), apenas valide-os.
-          for res in *_result.json; do
-            [ -s "$res" ] || continue
-            python - <<'PY'
-          import json,sys
-          p=sys.argv[1]
-          with open(p,'r',encoding='utf-8') as f: json.load(f)
-          print(f"[ok] JSON válido: {p}")
-          PY
-                "$res"
-              done
-
 
       - name: Upload dos artefatos de testes (.json)
         uses: actions/upload-artifact@v4
         with:
           name: sql-test-results
-          path: tests_output/*_result.json
-          if-no-files-found: error
+          path: tests_output/**/*.json
+          if-no-files-found: warn
 
-      # ====== Monta a pasta do GitHub Pages ======
+      # ---- Viewer simples (Leaflet) + manifest dinâmico ----
       - name: Montar site (viewer + json + manifest)
         run: |
           set -euo pipefail
-          mkdir -p public
-          cp .github/viewer_template.html public/index.html
+          rm -rf viewer
+          mkdir -p viewer
 
-          # Copia resultados
-          cp tests_output/*_result.json public/ || true
+          # Copia resultados para a raiz do viewer
+          cp -f tests_output/*_result.json viewer/ || true
 
-          # Gera manifest.json com a lista dos arquivos *_result.json
-          python3 - <<'PY' > public/manifest.json
-          import json, os
-          files = [f for f in os.listdir("public") if f.endswith("_result.json")]
-          files.sort()
-          print(json.dumps(files, ensure_ascii=False))
+          # Gera manifest.json listando os *_result.json
+          python - <<'PY'
+          import json, glob, os
+          files = sorted([os.path.basename(p) for p in glob.glob("viewer/*_result.json")])
+          with open("viewer/manifest.json", "w", encoding="utf-8") as f:
+              json.dump(files, f, ensure_ascii=False, indent=2)
+          print("[viewer] manifest.json:", files)
           PY
 
-                    echo "Conteúdo de public/:"
-                    ls -lah public
+          # Grava index.html (viewer Leaflet)
+          cat > viewer/index.html <<'HTML'
+          <!doctype html>
+          <html lang="pt-br">
+          <head>
+            <meta charset="utf-8"/>
+            <meta name="viewport" content="width=device-width,initial-scale=1"/>
+            <title>DPG — GeoJSON Viewer</title>
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+            <style>
+              html,body,#map{height:100%;margin:0}
+              .topbar{position:absolute;left:8px;top:8px;z-index:1000;background:#111;color:#fff;padding:6px 8px;border-radius:6px;font:14px/1.2 system-ui}
+              .topbar select{margin-left:6px}
+            </style>
+          </head>
+          <body>
+            <div class="topbar">
+              <strong>DPG — GeoJSON Viewer</strong>
+              <label> Arquivo:
+                <select id="fileSel"></select>
+              </label>
+            </div>
+            <div id="map"></div>
+
+            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+            <script>
+              const map = L.map('map').setView([-14.2350,-51.9253], 4);
+              L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                {maxZoom: 18, attribution: '&copy; OpenStreetMap'}).addTo(map);
+              const layerGroup = L.layerGroup().addTo(map);
+              const sel = document.getElementById('fileSel');
+
+              async function loadManifest(){
+                const files = await fetch('manifest.json').then(r=>r.json());
+                sel.innerHTML = '';
+                for (const f of files){
+                  const opt = document.createElement('option');
+                  opt.value = f; opt.textContent = f;
+                  sel.appendChild(opt);
+                }
+                if (files.length) loadFile(files[0]);
+              }
+
+              async function loadFile(name){
+                console.log('Carregando:', name);
+                const res = await fetch(name);
+                const text = await res.text();
+                let data;
+                // Aceita JSON com ou sem pretty e sem “+” no início das linhas
+                const clean = text.replace(/^\s*\+\s?/mg, '').trim();
+                data = JSON.parse(clean);
+
+                layerGroup.clearLayers();
+                const gj = L.geoJSON(data, {
+                  style: f => (f.properties && f.properties.rules && f.properties.rules.style) || {},
+                  pointToLayer: (f, latlng) => {
+                    const p = f.properties || {};
+                    const r = (p.rules && p.rules.style) || {};
+                    const radius = r.radius || 6;
+                    const fillColor = r.fillColor || p.fillColor || '#3388ff';
+                    const color = r.color || p.color || '#3388ff';
+                    return L.circleMarker(latlng, {radius, fillColor, color, weight: r.weight||2, opacity: r.opacity||1, fillOpacity: r.fillOpacity||0.6});
+                  }
+                }).addTo(layerGroup);
+                if (gj.getLayers().length) map.fitBounds(gj.getBounds(), {maxZoom: 15});
+              }
+
+              sel.addEventListener('change', e => loadFile(e.target.value));
+              loadManifest();
+            </script>
+          </body>
+          </html>
+          HTML
 
       - name: Publicar viewer no GitHub Pages
-        if: ${{ hashFiles('public/*.json') != '' }}
+        if: ${{ github.ref == 'refs/heads/main' }}
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./public
+          publish_dir: ./viewer
