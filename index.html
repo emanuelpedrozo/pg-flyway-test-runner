@@ -107,10 +107,17 @@
         return;
       }
 
+      // limpeza defensiva: remove linhas que sejam só "+"
+      let cleaned = text.replace(/^[ \t]*\+[ \t]*$/gm, '');
+      cleaned = cleaned.replace(/\r/g, ''); // normaliza CRLF se houver
       let data;
-      try { data = JSON.parse(text); }
-      catch (e) { console.error('Falha ao fazer JSON.parse do arquivo:', e); return; }
-
+      try {
+        data = JSON.parse(cleaned);
+      } catch (e) {
+        console.error('Falha ao fazer JSON.parse do arquivo:', e);
+        return;
+      }
+      
       console.log('FeatureCollection.features:', data?.features?.length ?? 0);
 
       layerGroup.clearLayers();
