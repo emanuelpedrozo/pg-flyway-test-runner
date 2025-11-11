@@ -1,4 +1,4 @@
-name: Flyway + Test CI + Map Viewer
+name: Flyway + Test CI
 
 on:
   push:
@@ -30,11 +30,12 @@ jobs:
       - name: Checkout repositório
         uses: actions/checkout@v4
 
-      - name: Instala Flyway
+      - name: Instalar Flyway CLI
         run: |
+          set -e
           curl -sL https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/10.22.0/flyway-commandline-10.22.0-linux-x64.tar.gz \
             | tar xz
-          sudo ln -s "$PWD/flyway-10.22.0/flyway" /usr/local/bin/flyway
+          sudo ln -sf "$PWD/flyway-10.22.0/flyway" /usr/local/bin/flyway
           flyway -v
 
       - name: Aplicar baseline e migrações
@@ -45,10 +46,12 @@ jobs:
           FLYWAY_SCHEMAS: geometry_bases
           FLYWAY_CLEAN_DISABLED: "true"
         run: |
+          set -e
           flyway -locations=filesystem:./sql/baseline,filesystem:./sql/migrations migrate
           flyway info
 
-      - name: Rodar TODOS os testes SQL e salvar saída
+      # ====== TESTES: gera saída "crua" dentro do container ======
+      - name: Rodar TODOS os testes SQL (gera RAW)
         env:
           PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
@@ -60,63 +63,77 @@ jobs:
             -v "${{ github.workspace }}/tests_output:/tests_output" \
             postgres:16 sh -lc '
               set -euo pipefail
-              apt-get update >/dev/null 2>&1 || true
-              apt-get install -y jq >/dev/null 2>&1 || true
               for f in /tests/*.sql; do
                 [ -e "$f" ] || continue
                 base="$(basename "$f" .sql)"
                 echo "==> Executando $base.sql"
-                # Executa o SQL e normaliza a saída:
-                #  - remove linhas que são apenas "+" (ou espaços +)
-                #  - remove espaços finais
-                #  - faz parse + regrava JSON via jq (garante JSON válido)
                 psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
                      -h localhost -p 5432 -U postgres -d dpg_dev \
-                     -f "$f" \
-                | sed -e "s/[[:space:]]\+$//" -e "/^[[:space:]]*+[[:space:]]*$/d" \
-                | jq -c . > "/tests_output/${base}_result.json"
+                     -f "$f" > "/tests_output/${base}_raw.json"
               done
-              echo "Arquivos gerados em /tests_output:"
+              echo "RAW em /tests_output:"
               ls -lah /tests_output
             '
+
+      # ====== Normaliza e valida JSONs fora do container ======
+      - name: Normalizar e validar JSONs (gera *_result.json)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for raw in tests_output/*_raw.json; do
+            base="$(basename "$raw" _raw.json)"
+            echo "==> Limpando $raw -> ${base}_result.json"
+
+            # 1) remove CR (Windows)
+            # 2) remove linhas que, após trim, são apenas "+"
+            # 3) valida/minifica com Python (falha se JSON inválido)
+            sed -e 's/\r$//' "$raw" \
+            | awk '{
+                t=$0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t);
+                if (t=="+") next;
+                print $0;
+              }' \
+            | python3 - <<'PY' > "tests_output/${base}_result.json"
+              import sys, json
+              data = sys.stdin.read()
+              print(json.dumps(json.loads(data), ensure_ascii=False))
+              PY
+                        done
+
+                        echo "Arquivos finais:"
+                        ls -lah tests_output/*_result.json
+
       - name: Upload dos artefatos de testes (.json)
         uses: actions/upload-artifact@v4
         with:
           name: sql-test-results
-          path: tests_output/**/*.json
+          path: tests_output/*_result.json
           if-no-files-found: error
 
-      # ---------- Publish Viewer (sem heredoc) ----------
-      - name: Preparar viewer (copiar JSONs e gerar manifest)
-        if: ${{ hashFiles('tests_output/*.json') != '' }}
+      # ====== Monta a pasta do GitHub Pages ======
+      - name: Montar site (viewer + json + manifest)
         run: |
           set -euo pipefail
-          mkdir -p viewer
+          mkdir -p public
+          cp .github/viewer_template.html public/index.html
 
-          # copia resultados gerados pelos testes
-          cp tests_output/*.json viewer/ 2>/dev/null || true
+          # Copia resultados
+          cp tests_output/*_result.json public/ || true
 
-          # lista apenas .json válidos (exclui manifest.json)
-          mapfile -t files < <(find viewer -maxdepth 1 -type f -name '*.json' ! -name 'manifest.json' -printf '%f\n' || true)
+          # Gera manifest.json com a lista dos arquivos *_result.json
+          python3 - <<'PY' > public/manifest.json
+          import json, os
+          files = [f for f in os.listdir("public") if f.endswith("_result.json")]
+          files.sort()
+          print(json.dumps(files, ensure_ascii=False))
+          PY
 
-          # debug no log
-          echo "Arquivos para o viewer:" "${files[@]:-<nenhum>}"
-
-          # se não houver json, não gera manifest e deixa o próximo step pular
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "Nenhum JSON copiado para viewer/. Verifique o step de testes."
-            exit 0
-          fi
-
-          # gera manifest.json com os nomes dos arquivos
-          printf '%s\n' "${files[@]}" | jq -R . | jq -s . > viewer/manifest.json
-
-          # usa o template HTML
-          cp .github/viewer_template.html viewer/index.html
+                    echo "Conteúdo de public/:"
+                    ls -lah public
 
       - name: Publicar viewer no GitHub Pages
-        if: ${{ hashFiles('viewer/*.json') != '' }}
+        if: ${{ hashFiles('public/*.json') != '' }}
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./viewer
+          publish_dir: ./public

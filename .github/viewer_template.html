@@ -18,7 +18,6 @@
   </style>
 </head>
 <body>
-  <!-- O contêiner do mapa PRECISA existir -->
   <div id="map"></div>
 
   <div class="topbar">
@@ -30,12 +29,8 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
   document.addEventListener('DOMContentLoaded', async () => {
-    // Garante que o contêiner existe
     const mapDiv = document.getElementById('map');
-    if (!mapDiv) {
-      console.error('DIV #map não encontrado no DOM.');
-      return;
-    }
+    if (!mapDiv) { console.error('DIV #map não encontrado.'); return; }
 
     const map = L.map('map').setView([-14.235, -51.9253], 4);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:18 }).addTo(map);
@@ -48,7 +43,6 @@
         const r = await fetch('manifest.json');
         if (!r.ok) throw new Error(`manifest status ${r.status}`);
         const files = await r.json();
-        console.log('manifest.json:', files);
         sel.innerHTML = '';
         for (const f of files) {
           const opt = document.createElement('option');
@@ -69,7 +63,6 @@
       return { color, fillColor, weight, fillOpacity };
     }
 
-    // util: varre coordenadas para bbox manual
     function expandBboxFromCoords(coords, bbox) {
       if (typeof coords[0] === 'number') {
         const [lon, lat] = coords;
@@ -95,21 +88,17 @@
     async function loadFile(name) {
       console.log('Carregando:', name);
 
-      // FETCH com diagnóstico
       const resp = await fetch(name);
       console.log('fetch status:', resp.status, resp.statusText);
       console.log('content-type:', resp.headers.get('content-type'));
       const text = await resp.text();
       console.log('first 200 chars:', text.slice(0,200));
 
-      if (!resp.ok) {
-        console.error('Resposta não OK, abortando render.');
-        return;
-      }
+      if (!resp.ok) { console.error('Resposta não OK.'); return; }
 
-      // limpeza defensiva: remove linhas que sejam só "+"
-      let cleaned = text.replace(/^[ \t]*\+[ \t]*$/gm, '');
-      cleaned = cleaned.replace(/\r/g, ''); // normaliza CRLF se houver
+      // limpeza defensiva: remove linhas que sejam só "+" e CR
+      let cleaned = text.replace(/^[ \t]*\+[ \t]*$/gm, '').replace(/\r/g, '');
+
       let data;
       try {
         data = JSON.parse(cleaned);
@@ -117,8 +106,6 @@
         console.error('Falha ao fazer JSON.parse do arquivo:', e);
         return;
       }
-      
-      console.log('FeatureCollection.features:', data?.features?.length ?? 0);
 
       layerGroup.clearLayers();
       const gj = L.geoJSON(data, {
@@ -130,20 +117,11 @@
         })
       }).addTo(layerGroup);
 
-      console.log('layers adicionadas:', gj.getLayers().length);
-
-      // tenta bounds via Leaflet
       let bounds = gj.getBounds();
-      console.log('bounds Leaflet:', bounds);
-
-      // se inválido, bbox manual
       if (!bounds || !bounds.isValid()) {
         const bb = manualBbox(data);
-        console.log('bbox manual:', bb);
         if (bb) {
-          const sw = L.latLng(bb.minLat, bb.minLon);
-          const ne = L.latLng(bb.maxLat, bb.maxLon);
-          bounds = L.latLngBounds(sw, ne);
+          bounds = L.latLngBounds(L.latLng(bb.minLat, bb.minLon), L.latLng(bb.maxLat, bb.maxLon));
         }
       }
 
@@ -153,7 +131,6 @@
         if (sw.equals(ne)) map.setView(bounds.getCenter(), 15);
         else map.fitBounds(bounds, { padding: [40, 40] });
       } else {
-        console.warn('Nenhuma geometria válida; usando Brasil');
         map.setView([-14.235,-51.9253], 4);
       }
     }
