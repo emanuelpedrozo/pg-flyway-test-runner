@@ -57,23 +57,25 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tests_output
+
+          uid="$(id -u)"
+          gid="$(id -g)"
+
           docker run --rm --network host \
+            --user "${uid}:${gid}" \
             -e PGPASSWORD="${PGPASSWORD}" \
-            -v "${{ github.workspace }}/tests:/tests:ro" \
+            -v "${{ github.workspace }}/tests:/tests" \
             -v "${{ github.workspace }}/tests_output:/tests_output" \
-            postgres:16 sh -lc '
-              set -euo pipefail
-              for f in /tests/*.sql; do
-                [ -e "$f" ] || continue
-                base="$(basename "$f" .sql)"
-                echo "==> Executando $base.sql"
+            postgres:16 \
+            sh -lc 'set -euo pipefail;
+              ls -1 /tests/*.sql 2>/dev/null | while read -r f; do
+                base="$(basename "$f" .sql)";
+                echo "==> Executando $base.sql";
                 psql -q -t -A -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
                      -h localhost -p 5432 -U postgres -d dpg_dev \
-                     -f "$f" > "/tests_output/${base}_raw.json"
-              done
-              echo "RAW em /tests_output:"
-              ls -lah /tests_output
-            '
+                     -f "$f" > "/tests_output/${base}_raw.json";
+              done;
+              echo "Arquivos RAW em /tests_output:"; ls -lah /tests_output'
 
       # ====== Normaliza e valida JSONs fora do container ======
       - name: Normalizar e validar JSONs (gera *_result.json)
