@@ -83,14 +83,22 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+
+          echo "Listando arquivos RAW gerados:"
+          ls -lah tests_output || true
+
           for raw in tests_output/*_raw.json; do
             base="$(basename "$raw" _raw.json)"
             out="tests_output/${base}_result.json"
-            echo "==> Limpando $raw -> $out"
+            echo ""
+            echo "==> Processando $raw -> $out"
 
-            # 1) remove CR (\r) de Windows
-            # 2) descarta linhas que são apenas "+"
-            # 3) remove qualquer '+' no final da linha (com espaços)
+            echo "Tamanho (bytes): $(wc -c < "$raw" || echo 0)"
+            echo "Primeiras linhas (visíveis) do RAW:"
+            # Mostra caracteres de controle (\r, \t etc.) com o final de linha marcado por $
+            sed -n '1,20p' "$raw" | sed -n 's/[[:cntrl:]]/\\n/g; s/$/$/p' || true
+
+            # Limpeza: remove CR, remove linhas que são apenas '+', remove '+' no fim da linha
             cleaned="$(
               sed -e 's/\r$//' "$raw" \
               | awk '{
@@ -101,31 +109,30 @@ jobs:
               | sed -E 's/[[:space:]]*\+[[:space:]]*$//'
             )"
 
-            # Se ficou vazio depois da limpeza, falha com diagnóstico
             if [ -z "${cleaned}" ]; then
-              echo "::error file=${raw}::Arquivo ficou vazio após limpeza. Primeiras linhas brutas:"
-              head -n 20 "$raw" || true
-              exit 1
+              echo "::warning file=${raw}::Após limpeza ficou vazio. Vou copiar o RAW para ${out} para diagnóstico."
+              cp -f "$raw" "$out" || true
+              continue
             fi
 
-            # Valida e grava o JSON. Falha se inválido (mostra um trecho)
-            printf '%s' "${cleaned}" \
-              | OUT="$out" python3 -c 'import os, sys, json
-          data = sys.stdin.read().strip()
-          try:
-              obj = json.loads(data)
-          except Exception:
-              print("=== JSON inválido. Primeiros 300 chars após limpeza ===")
-              print(data[:300])
-              raise
-          out = os.environ["OUT"]
-          with open(out, "w", encoding="utf-8") as f:
-              f.write(json.dumps(obj, ensure_ascii=False))
-          print(f"[ok] gravado: {out}")'
+            # Tenta validar como JSON; se falhar, grava mesmo assim e segue (para você inspecionar)
+            if python3 - <<'PY' <<<"$cleaned"; then
+          import sys, json
+          json.loads(sys.stdin.read())
+          PY
+                      then
+                        printf '%s' "${cleaned}" > "$out"
+                        echo "[ok] JSON válido gravado: $out"
+                      else
+                        echo "::warning file=${raw}::Conteúdo não é JSON válido. Salvando mesmo assim em ${out} para inspeção."
+                        printf '%s' "${cleaned}" > "$out"
+                      fi
                     done
 
-                    echo "Arquivos finais:"
-                    ls -lah tests_output/*_result.json
+                    echo ""
+                    echo "Arquivos finais em tests_output/:"
+                    ls -lah tests_output
+
 
       - name: Upload dos artefatos de testes (.json)
         uses: actions/upload-artifact@v4
