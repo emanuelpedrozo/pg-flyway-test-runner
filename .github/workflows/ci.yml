@@ -120,12 +120,12 @@ jobs:
           import sys, json
           json.loads(sys.stdin.read())
           PY
-            then
-              printf '%s' "${cleaned}" > "$out"
-              echo "[ok] JSON válido gravado: $out"
-            else
-              echo "::warning file=${raw}::Conteúdo não é JSON válido. Salvando mesmo assim em ${out} para inspeção."
-              printf '%s' "${cleaned}" > "$out"
+          then
+          printf '%s' "${cleaned}" > "$out"
+          echo "[ok] JSON válido gravado: $out"
+          else
+          echo "::warning file=${raw}::Conteúdo não é JSON válido. Salvando mesmo assim em ${out} para inspeção."
+          printf '%s' "${cleaned}" > "$out"
             fi
           done
 
