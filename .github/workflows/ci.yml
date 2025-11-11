@@ -98,10 +98,10 @@ jobs:
               data = sys.stdin.read()
               print(json.dumps(json.loads(data), ensure_ascii=False))
               PY
-                        done
+              done
 
-                        echo "Arquivos finais:"
-                        ls -lah tests_output/*_result.json
+              echo "Arquivos finais:"
+              ls -lah tests_output/*_result.json
 
       - name: Upload dos artefatos de testes (.json)
         uses: actions/upload-artifact@v4
