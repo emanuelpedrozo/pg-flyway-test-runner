@@ -101,7 +101,7 @@ jobs:
           mkdir -p viewer
 
           # Copia resultados para a raiz do viewer
-          cp -f tests_output/*_result.json viewer/ || true
+          cp -f tests_output/*_result.json viewer/ 2>/dev/null || true
 
           # Gera manifest.json listando os *_result.json
           python - <<'PY'
@@ -112,79 +112,11 @@ jobs:
           print("[viewer] manifest.json:", files)
           PY
 
-          # Grava index.html (viewer Leaflet)
-          cat > viewer/index.html <<'HTML'
-          <!doctype html>
-          <html lang="pt-br">
-          <head>
-            <meta charset="utf-8"/>
-            <meta name="viewport" content="width=device-width,initial-scale=1"/>
-            <title>DPG — GeoJSON Viewer</title>
-            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-            <style>
-              html,body,#map{height:100%;margin:0}
-              .topbar{position:absolute;left:8px;top:8px;z-index:1000;background:#111;color:#fff;padding:6px 8px;border-radius:6px;font:14px/1.2 system-ui}
-              .topbar select{margin-left:6px}
-            </style>
-          </head>
-          <body>
-            <div class="topbar">
-              <strong>DPG — GeoJSON Viewer</strong>
-              <label> Arquivo:
-                <select id="fileSel"></select>
-              </label>
-            </div>
-            <div id="map"></div>
+          # >>> usa o template do repo <<<
+          cp .github/workflows/viewer_template.html viewer/index.html
 
-            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-            <script>
-              const map = L.map('map').setView([-14.2350,-51.9253], 4);
-              L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                {maxZoom: 18, attribution: '&copy; OpenStreetMap'}).addTo(map);
-              const layerGroup = L.layerGroup().addTo(map);
-              const sel = document.getElementById('fileSel');
-
-              async function loadManifest(){
-                const files = await fetch('manifest.json').then(r=>r.json());
-                sel.innerHTML = '';
-                for (const f of files){
-                  const opt = document.createElement('option');
-                  opt.value = f; opt.textContent = f;
-                  sel.appendChild(opt);
-                }
-                if (files.length) loadFile(files[0]);
-              }
-
-              async function loadFile(name){
-                console.log('Carregando:', name);
-                const res = await fetch(name);
-                const text = await res.text();
-                let data;
-                // Aceita JSON com ou sem pretty e sem “+” no início das linhas
-                const clean = text.replace(/^\s*\+\s?/mg, '').trim();
-                data = JSON.parse(clean);
-
-                layerGroup.clearLayers();
-                const gj = L.geoJSON(data, {
-                  style: f => (f.properties && f.properties.rules && f.properties.rules.style) || {},
-                  pointToLayer: (f, latlng) => {
-                    const p = f.properties || {};
-                    const r = (p.rules && p.rules.style) || {};
-                    const radius = r.radius || 6;
-                    const fillColor = r.fillColor || p.fillColor || '#3388ff';
-                    const color = r.color || p.color || '#3388ff';
-                    return L.circleMarker(latlng, {radius, fillColor, color, weight: r.weight||2, opacity: r.opacity||1, fillOpacity: r.fillOpacity||0.6});
-                  }
-                }).addTo(layerGroup);
-                if (gj.getLayers().length) map.fitBounds(gj.getBounds(), {maxZoom: 15});
-              }
-
-              sel.addEventListener('change', e => loadFile(e.target.value));
-              loadManifest();
-            </script>
-          </body>
-          </html>
-          HTML
+          # Garante diferença a cada execução (evita "Nothing to deploy")
+          echo "build: ${{ github.sha }} @ $(date -u +%FT%TZ)" > viewer/build.txt
 
       - name: Publicar viewer no GitHub Pages
         if: ${{ hashFiles('viewer/**') != '' }}  # publica se existir QUALQUER arquivo em viewer/
