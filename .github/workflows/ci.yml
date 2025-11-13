@@ -113,7 +113,7 @@ jobs:
           PY
 
           # >>> usa o template do repo <<<
-          cp .github/workflows/viewer_template.html viewer/index.html
+          cp .github/viewer_template.html viewer/index.html
 
           # Garante diferença a cada execução (evita "Nothing to deploy")
           echo "build: ${{ github.sha }} @ $(date -u +%FT%TZ)" > viewer/build.txt
