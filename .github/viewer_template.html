@@ -1,210 +1,162 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
+<!doctype html>
+<html lang="pt-br">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>DPG — GeoJSON Viewer</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
-    html, body { height: 100%; margin: 0; }
-    #map { height: 100%; width: 100%; }
-    .topbar {
-      position: absolute; top:0; left:0; right:0; z-index:1000;
-      background:#111; color:#fff; padding:6px 10px;
-      font-family: system-ui, sans-serif; font-size:14px;
-      display:flex; gap:8px; align-items:center;
-    }
-    select { padding:3px 6px; border:none; border-radius:4px; }
+    html,body,#map{height:100%;margin:0}
+    .topbar{position:absolute;left:8px;top:8px;z-index:1000;background:#111;color:#fff;padding:6px 10px;border-radius:6px;font:14px/1.2 system-ui}
+    .topbar select{margin-left:6px}
+    .layer-controls{position:absolute;top:50px;left:8px;z-index:1000;background:#fff;padding:6px 10px;border-radius:6px;box-shadow:0 0 4px rgba(0,0,0,0.2);font:13px system-ui}
+    .layer-controls label{display:block;margin:3px 0}
+    button.reset-btn{margin-top:6px;background:#444;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer}
+    button.reset-btn:hover{background:#666}
   </style>
 </head>
 <body>
-  <div id="map"></div>
-
   <div class="topbar">
     <strong>DPG — GeoJSON Viewer</strong>
-    <span>Arquivo:</span>
-    <select id="fileSel"></select>
+    <label> Arquivo:
+      <select id="fileSel"></select>
+    </label>
   </div>
+
+  <div class="layer-controls" id="layerControls">
+    <button class="reset-btn" id="resetBtn">Resetar</button>
+  </div>
+
+  <div id="map"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-  // ====== Map base ======
-  const map = L.map('map').setView([-14.2350,-51.9253], 4);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    {maxZoom: 18, attribution: '&copy; OpenStreetMap'}).addTo(map);
+    const map = L.map('map').setView([-14.2350, -51.9253], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
 
-  const rootGroup = L.layerGroup().addTo(map);
-  const sel = document.getElementById('fileSel');
+    const sel = document.getElementById('fileSel');
+    const layerGroup = L.layerGroup().addTo(map);
+    const layerControls = document.getElementById('layerControls');
+    const resetBtn = document.getElementById('resetBtn');
+    let activeLayers = [];
 
-  // UI simples p/ camadas
-  const topbar = document.querySelector('.topbar');
-  const groupBox = document.createElement('span');
-  groupBox.style.marginLeft = '10px';
-  topbar.appendChild(groupBox);
-
-  const groupsState = new Map(); // nome -> { group: L.LayerGroup, visible: bool }
-
-  // ====== Carregar lista ======
-  async function loadManifest(){
-    const files = await fetch('manifest.json').then(r=>r.json());
-    sel.innerHTML = '';
-    for (const f of files){
-      const opt = document.createElement('option');
-      opt.value = f; opt.textContent = f;
-      sel.appendChild(opt);
+    async function loadManifest() {
+      const files = await fetch('manifest.json').then(r => r.json());
+      sel.innerHTML = '';
+      for (const f of files) {
+        const opt = document.createElement('option');
+        opt.value = f;
+        opt.textContent = f;
+        sel.appendChild(opt);
+      }
+      if (files.length) loadFile(files[0]);
     }
-    if (files.length) loadFile(files[0]);
-  }
 
-  // ====== Helpers ======
-  function featureName(p={}) {
-    return p.displayName || p.layerCode || p.tipo || '(sem nome)';
-  }
-  function pretty(obj){ return JSON.stringify(obj, null, 2); }
+    async function loadFile(name) {
+      console.log('Carregando:', name);
+      const res = await fetch(name);
+      const text = await res.text();
+      const clean = text.replace(/^\s*\+\s?/mg, '').trim();
+      const data = JSON.parse(clean);
 
-  function makePopup(layer, feat) {
-    const p = feat.properties || {};
-    const title = featureName(p);
-    const el = document.createElement('div');
-    el.style.minWidth = '260px';
-    el.innerHTML = `
-      <div style="font-weight:600;margin-bottom:6px">${title}</div>
-      <pre style="white-space:pre-wrap;max-height:220px;overflow:auto;margin:0 0 8px 0">${pretty(p)}</pre>
-      <button id="btnDel" style="background:#c62828;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer">Excluir esta feature</button>
-    `;
-    // excluir a feature do mapa (apenas do viewer)
-    el.querySelector('#btnDel').onclick = () => {
-      const parent = layer.__parentGroup || rootGroup;
-      parent.removeLayer(layer);
-      map.closePopup();
-    };
-    return el;
-  }
+      layerGroup.clearLayers();
+      activeLayers = [];
 
-  function buildGroupsUI() {
-    // limpa UI
-    groupBox.innerHTML = '';
-    if (!groupsState.size) return;
+      const gj = L.geoJSON(data, {
+        style: f => (f.properties?.rules?.style) || {},
+        pointToLayer: (f, latlng) => {
+          const p = f.properties || {};
+          const r = (p.rules && p.rules.style) || {};
+          return L.circleMarker(latlng, {
+            radius: r.radius || 6,
+            fillColor: r.fillColor || p.fillColor || '#3388ff',
+            color: r.color || p.color || '#3388ff',
+            weight: r.weight || 2,
+            opacity: r.opacity || 1,
+            fillOpacity: r.fillOpacity || 0.6
+          });
+        },
+        onEachFeature: (feature, layer) => {
+          // Monta popup DOM
+          const container = document.createElement('div');
 
-    // para cada "camada" (layerCode/tipo) cria um checkbox
-    groupsState.forEach((state, name) => {
-      const id = 'g_' + btoa(name).replace(/=/g,'');
-      const wrap = document.createElement('label');
-      wrap.style.marginLeft = '8px';
-      wrap.title = 'mostrar/ocultar grupo';
-      wrap.innerHTML = `
-        <input id="${id}" type="checkbox" ${state.visible ? 'checked':''}>
-        ${name}
-      `;
-      groupBox.appendChild(wrap);
+          const title = document.createElement('div');
+          title.style.fontWeight = '600';
+          title.style.marginBottom = '6px';
+          title.textContent = (feature.properties?.tipo) || (feature.properties?.layerCode) || 'Feature';
+          container.appendChild(title);
 
-      wrap.querySelector('input').addEventListener('change', (e) => {
-        state.visible = e.target.checked;
-        if (state.visible) {
-          rootGroup.addLayer(state.group);
-        } else {
-          rootGroup.removeLayer(state.group);
+          const pre = document.createElement('pre');
+          pre.style.maxHeight = '260px';
+          pre.style.overflow = 'auto';
+          pre.style.margin = 0;
+          pre.textContent = JSON.stringify(feature.properties || {}, null, 2);
+          container.appendChild(pre);
+
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.textContent = 'Excluir esta feature';
+          btn.style.marginTop = '8px';
+          btn.style.background = '#dc3545';
+          btn.style.color = '#fff';
+          btn.style.border = 'none';
+          btn.style.padding = '6px 10px';
+          btn.style.borderRadius = '4px';
+          btn.style.cursor = 'pointer';
+          btn.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            layer.remove();
+          });
+          container.appendChild(btn);
+
+          layer.bindPopup(container);
         }
+      }).addTo(layerGroup);
+
+      activeLayers.push(gj);
+
+      // Gera lista de camadas únicas
+      const tipos = [...new Set(data.features.map(f => f.properties?.tipo).filter(Boolean))];
+      layerControls.querySelectorAll('label').forEach(l => l.remove());
+      tipos.forEach(tipo => {
+        const lbl = document.createElement('label');
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.checked = true;
+        chk.value = tipo;
+        chk.addEventListener('change', () => toggleLayer(tipo, chk.checked));
+        lbl.appendChild(chk);
+        lbl.append(' ' + tipo);
+        layerControls.insertBefore(lbl, resetBtn);
       });
-    });
 
-    // botão reset (recolocar tudo)
-    const reset = document.createElement('button');
-    reset.textContent = 'Resetar';
-    reset.style.marginLeft = '8px';
-    reset.style.padding = '4px 8px';
-    reset.style.borderRadius = '6px';
-    reset.onclick = () => {
-      groupsState.forEach((state, name) => {
-        state.visible = true;
-        rootGroup.addLayer(state.group);
-      });
-      // marcar todos checkboxes
-      groupBox.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
-    };
-    groupBox.appendChild(reset);
-  }
-
-  // ====== Carregar arquivo ======
-  async function loadFile(name){
-    console.log('Carregando:', name);
-    const res  = await fetch(name);
-    const text = await res.text();
-    // limpa possível prefixo de '+' em linhas (caso JSON tenha sido colado de diff)
-    const clean = text.replace(/^\s*\+\s?/mg, '').trim();
-    const data  = JSON.parse(clean);
-
-    rootGroup.clearLayers();
-    groupsState.clear();
-
-    // agrupamos por layerCode/tipo para poder ocultar/mostrar
-    const buckets = new Map(); // chave -> array de features
-    for (const f of (data.features || [])) {
-      const p = f.properties || {};
-      const key = featureName(p);
-      if (!buckets.has(key)) buckets.set(key, []);
-      buckets.get(key).push(f);
+      if (gj.getLayers().length) map.fitBounds(gj.getBounds(), { maxZoom: 15 });
     }
 
-    // estilo/hover
-    function styleFor(p={}) {
-      const s = (p.rules && p.rules.style) || {};
-      return {
-        color: s.color || p.color || '#3388ff',
-        weight: s.weight ?? 2,
-        opacity: s.opacity ?? 1,
-        fillColor: s.fillColor || p.fillColor || s.color || '#3388ff',
-        fillOpacity: s.fillOpacity ?? 0.4
-      };
-    }
-
-    // cria grupos por chave
-    buckets.forEach((features, key) => {
-      const group = L.layerGroup();
-      features.forEach((feat) => {
-        const p = feat.properties || {};
-        const layer = L.geoJSON(feat, {
-          style: () => styleFor(p),
-          pointToLayer: (f, latlng) => {
-            const s = styleFor(p);
-            return L.circleMarker(latlng, {
-              radius: (p.rules && p.rules.style && p.rules.style.radius) || 6,
-              color: s.color, weight: s.weight, opacity: s.opacity,
-              fillColor: s.fillColor, fillOpacity: s.fillOpacity
-            });
-          },
-          onEachFeature: (f, lyr) => {
-            // hover highlight
-            const normal = styleFor(p);
-            const hover  = {...normal, weight: (normal.weight||2) + 2};
-            lyr.on('mouseover', () => {
-              if (lyr.setStyle) lyr.setStyle(hover);
-            });
-            lyr.on('mouseout', () => {
-              if (lyr.setStyle) lyr.setStyle(normal);
-            });
-            // popup com botão excluir
-            const popup = makePopup(lyr, f);
-            lyr.bindPopup(popup);
-            // referência ao grupo para o botão excluir
-            lyr.__parentGroup = group;
+    function toggleLayer(tipo, visible) {
+      activeLayers.forEach(gj => {
+        gj.eachLayer(layer => {
+          const props = layer.feature?.properties;
+          if (props?.tipo === tipo) {
+            if (visible) layer.addTo(layerGroup);
+            else layerGroup.removeLayer(layer);
           }
         });
-        group.addLayer(layer);
       });
-      group.addTo(rootGroup);
-      groupsState.set(key, {group, visible: true});
+    }
+
+    sel.addEventListener('change', e => loadFile(e.target.value));
+    resetBtn.addEventListener('click', () => {
+      layerControls.querySelectorAll('input[type=checkbox]').forEach(chk => chk.checked = true);
+      layerGroup.clearLayers();
+      loadFile(sel.value);
     });
 
-    buildGroupsUI();
-
-    // fit
-    const all = rootGroup.getLayers();
-    if (all.length) map.fitBounds(L.featureGroup(all).getBounds(), {maxZoom: 15});
-  }
-
-  sel.addEventListener('change', e => loadFile(e.target.value));
-  loadManifest();
-</script>
+    loadManifest();
+  </script>
 </body>
 </html>
