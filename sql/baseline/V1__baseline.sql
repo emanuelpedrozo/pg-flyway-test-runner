@@ -348,6 +348,8 @@ $function$
 
 -- DROP FUNCTION geometry_bases.native_vegetation(jsonb);
 
+-- DROP FUNCTION geometry_bases.native_vegetation(jsonb);
+
 CREATE OR REPLACE FUNCTION geometry_bases.native_vegetation(p_fc jsonb)
  RETURNS jsonb
  LANGUAGE plpgsql
@@ -367,6 +369,7 @@ DECLARE
   area_nv_ha   numeric := 0;
 
   -- recortes "obrigatórios"
+  g_ca_poly    geometry;
   g_river_poly geometry;
   g_lake_poly  geometry;
   g_pub_infra  geometry;
@@ -414,6 +417,7 @@ BEGIN
   END IF;
 
   -- 4) carregar geometrias para recorte
+  g_ca_poly    := geometry_bases.f_get_layer_geom(p_fc, 'CONSOLIDATED_AREA', 'POLYGON');
   g_river_poly := geometry_bases.f_get_layer_geom(p_fc, 'RIVER',         'POLYGON');
   g_lake_poly  := geometry_bases.f_get_layer_geom(p_fc, 'LAKE_LAGOON',   'POLYGON');
   g_pub_infra  := geometry_bases.f_get_layer_geom(p_fc, 'PUBLIC_INFRASTRUCTURE', 'POLYGON');
@@ -423,6 +427,9 @@ BEGIN
   g_nv_clean := g_nv_clip; -- Começa com a NV clipada pelo imóvel
 
   -- 4.1) Aplicar recortes (ST_Difference)
+  IF g_ca_poly IS NOT NULL AND NOT ST_IsEmpty(g_ca_poly) THEN
+    g_nv_clean := ST_Difference(g_nv_clean, g_ca_poly);
+  END IF;
   IF g_river_poly IS NOT NULL AND NOT ST_IsEmpty(g_river_poly) THEN
     g_nv_clean := ST_Difference(g_nv_clean, g_river_poly);
   END IF;
@@ -518,11 +525,6 @@ DECLARE
   g_spring_pt  geometry;
   g_river_line geometry;
 
-  -- Vegetação nativa (prioritária)
-  g_nv_raw   geometry;
-  g_nv_clip  geometry;
-  g_nv_union geometry; -- Esta variável agora é 'g_nv_clip'
-
   -- Propriedades originais a preservar
   props_orig jsonb := '{}'::jsonb;
   feat_new   jsonb;
@@ -556,23 +558,7 @@ BEGIN
     RETURN geometry_bases.f_fc_replace_layer(p_fc, 'CONSOLIDATED_AREA', NULL);
   END IF;
 
-  -- 5) Vegetação nativa (prioritária) → retira da Agro
-  g_nv_raw := geometry_bases.f_get_layer_geom(p_fc, 'REMAINING_NATIVE_VEGETATION', 'POLYGON');
-  IF g_nv_raw IS NULL OR ST_IsEmpty(g_nv_raw) THEN
-    g_nv_raw := geometry_bases.f_get_layer_geom(p_fc, 'NATIVE_VEGETATION', 'POLYGON');
-  END IF;
-
   g_agro_clean := g_agro_clip; -- Começa com a área consolidada já clipada
-
-  IF g_nv_raw IS NOT NULL AND NOT ST_IsEmpty(g_nv_raw) THEN
-    -- CORREÇÃO: Lógica simplificada. g_nv_raw já é válida e unificada.
-    -- g_nv_union agora é apenas a NV clipada pelo imóvel.
-    g_nv_union := ST_Intersection(g_nv_raw, g_imovel);
-    
-    IF g_nv_union IS NOT NULL AND NOT ST_IsEmpty(g_nv_union) THEN
-      g_agro_clean := ST_Difference(g_agro_clean, g_nv_union);
-    END IF;
-  END IF;
 
   -- 6) Demais recortes (rios, lagos, infra…)
   g_infra      := geometry_bases.f_get_layer_geom(p_fc, 'PROPERTY_INFRASTRUCTURE', 'POLYGON');
@@ -595,6 +581,13 @@ BEGIN
     g_agro_clean := ST_Difference(g_agro_clean, g_lake_poly);
   END IF;
 
+  /* -----------------------------------------------------------------
+   * CORREÇÃO: Buffers de nascente e rio refeitos usando 'geography'
+   * para garantir o cálculo correto em metros.
+   * (Nota: O buffer de 1m para nascente parece estranho, mas foi mantido
+   * conforme o código original.)
+   * -----------------------------------------------------------------
+  */
   IF g_spring_pt IS NOT NULL AND NOT ST_IsEmpty(g_spring_pt) THEN
     g_agro_clean := ST_Difference(
       g_agro_clean,
@@ -634,7 +627,6 @@ BEGIN
 END;
 $function$
 ;
-
 
 -- ===================================================================
 -- FUNÇÃO 5: rivers_up_to_10m
