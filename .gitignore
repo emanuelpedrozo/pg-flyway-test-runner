@@ -1,6 +1,7 @@
 # docker
 pgdata/
 tests_output/
+viewer/
 .env
 *.log
 

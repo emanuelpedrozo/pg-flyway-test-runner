@@ -28,10 +28,10 @@ services:
       FLYWAY_PASSWORD: ${PGPASSWORD}
       FLYWAY_SCHEMAS: ${FLYWAY_SCHEMAS}
       FLYWAY_CLEAN_DISABLED: "true"
-      FLYWAY_LOCATIONS: filesystem:/flyway/sql/baseline,filesystem:/flyway/sql/migrations
+      FLYWAY_LOCATIONS: filesystem:/flyway/project/modules/${MODULE}/sql/baseline,filesystem:/flyway/project/modules/${MODULE}/sql/migrations
     command: migrate
     volumes:
-      - ./sql:/flyway/sql:ro
+      - ./:/flyway/project:ro
     restart: "no"
 
   db-tests:
@@ -42,11 +42,15 @@ services:
       flyway-migrate:
         condition: service_completed_successfully
     environment:
-      PGPASSWORD: postgres   # ajuste se sua senha for outra
-    command: ["sh","-c","mkdir -p /tests_output && psql -v ON_ERROR_STOP=1 -h postgres -p 5432 -U postgres -d dpg_dev -f /tests/test_paa_rio.sql && ls -lah /tests_output"]
-
+      PGPASSWORD: ${PGPASSWORD}
+    command:
+      [
+        "sh",
+        "-c",
+        "set -e; mkdir -p /tests_output; if ls /tests/*.sql >/dev/null 2>&1; then for f in /tests/*.sql; do echo \"==> Executando $$(basename \"$$f\")\"; psql -X -v ON_ERROR_STOP=1 -P pager=off -P footer=off -h ${PGHOST} -p ${PGPORT} -U ${PGUSER} -d ${PGDATABASE} -f \"$$f\"; done; else echo \"Nenhum teste SQL encontrado para o módulo ${MODULE}.\"; fi; ls -lah /tests_output"
+      ]
     volumes:
-      - ./tests:/tests:ro
+      - ./modules/${MODULE}/tests:/tests:ro
       - ./tests_output:/tests_output
     restart: "no"
 

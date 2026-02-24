@@ -1,4 +1,4 @@
-name: Flyway + Test CI + Viewer
+name: Flyway + SQL Tests + Viewer
 
 on:
   push:
@@ -10,6 +10,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [dpg, prepreenchido]
 
     services:
       postgres:
@@ -30,7 +34,35 @@ jobs:
       - name: Checkout repositório
         uses: actions/checkout@v4
 
+      - name: Descobrir conteúdo do módulo
+        id: module_scan
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          sql_files=(modules/${MODULE}/sql/baseline/V*.sql modules/${MODULE}/sql/migrations/V*.sql)
+          test_files=(modules/${MODULE}/tests/*.sql)
+
+          if (( ${#sql_files[@]} > 0 )); then
+            echo "has_sql=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_sql=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if (( ${#test_files[@]} > 0 )); then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "[module] ${MODULE}"
+          echo "[sql] ${#sql_files[@]} arquivo(s)"
+          echo "[tests] ${#test_files[@]} arquivo(s)"
+
       - name: Instalar Flyway CLI
+        if: steps.module_scan.outputs.has_sql == 'true'
         run: |
           curl -sL https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/10.22.0/flyway-commandline-10.22.0-linux-x64.tar.gz \
             | tar xz
@@ -38,27 +70,31 @@ jobs:
           flyway -v
 
       - name: Aplicar baseline e migrações
+        if: steps.module_scan.outputs.has_sql == 'true'
         env:
+          MODULE: ${{ matrix.module }}
           FLYWAY_URL: jdbc:postgresql://localhost:5432/dpg_dev
           FLYWAY_USER: postgres
           FLYWAY_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           FLYWAY_SCHEMAS: geometry_bases
           FLYWAY_CLEAN_DISABLED: "true"
         run: |
-          flyway -locations=filesystem:./sql/baseline,filesystem:./sql/migrations migrate
+          set -euo pipefail
+          flyway -locations="filesystem:./modules/${MODULE}/sql/baseline,filesystem:./modules/${MODULE}/sql/migrations" migrate
           flyway info
 
-      # IMPORTANTE: Os .sql devem usar \g /tests_output/<nome>_result.json
-      - name: Rodar TODOS os testes SQL (gera arquivos via \g)
+      - name: Rodar testes SQL do módulo
+        if: steps.module_scan.outputs.has_sql == 'true' && steps.module_scan.outputs.has_tests == 'true'
         env:
+          MODULE: ${{ matrix.module }}
           PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
           set -euo pipefail
-          mkdir -p tests_output
+          mkdir -p "tests_output/${MODULE}"
           docker run --rm --network host \
             -e PGPASSWORD="${PGPASSWORD}" \
-            -v "${{ github.workspace }}/tests:/tests:ro" \
-            -v "${{ github.workspace }}/tests_output:/tests_output" \
+            -v "${{ github.workspace }}/modules/${MODULE}/tests:/tests:ro" \
+            -v "${{ github.workspace }}/tests_output/${MODULE}:/tests_output" \
             postgres:16 \
             sh -lc 'set -euo pipefail;
               for f in /tests/*.sql; do
@@ -66,19 +102,22 @@ jobs:
                 psql -X -v ON_ERROR_STOP=1 -P pager=off -P footer=off \
                      -h localhost -p 5432 -U postgres -d dpg_dev -f "$f";
               done'
-          # Ajusta permissões se o container gravar como root
-          sudo chown -R $USER:$USER tests_output || true
-          ls -lah tests_output
+          sudo chown -R $USER:$USER "tests_output/${MODULE}" || true
+          ls -lah "tests_output/${MODULE}"
 
-      - name: Validar JSONs gerados (*_result.json)
+      - name: Validar JSONs gerados
+        if: steps.module_scan.outputs.has_tests == 'true'
+        env:
+          MODULE: ${{ matrix.module }}
         run: |
           set -euo pipefail
-          cd tests_output
+          mkdir -p "tests_output/${MODULE}"
+          cd "tests_output/${MODULE}"
           python - <<'PY'
           import json, glob, sys
           files = sorted(glob.glob("*_result.json"))
           if not files:
-              print("[warn] Nenhum *_result.json encontrado em tests_output.")
+              print("[warn] Nenhum *_result.json encontrado.")
               sys.exit(0)
           for p in files:
               with open(p, "r", encoding="utf-8") as f:
@@ -87,23 +126,24 @@ jobs:
           PY
 
       - name: Upload dos artefatos de testes (.json)
+        if: steps.module_scan.outputs.has_tests == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: sql-test-results
-          path: tests_output/**/*.json
+          name: sql-test-results-${{ matrix.module }}
+          path: tests_output/${{ matrix.module }}/*.json
           if-no-files-found: warn
 
-      # ---- Viewer simples (Leaflet) + manifest dinâmico ----
-      - name: Montar site (viewer + json + manifest)
+      - name: Montar site do módulo (viewer + manifest)
+        if: steps.module_scan.outputs.has_tests == 'true'
+        env:
+          MODULE: ${{ matrix.module }}
         run: |
           set -euo pipefail
           rm -rf viewer
           mkdir -p viewer
 
-          # Copia resultados para a raiz do viewer
-          cp -f tests_output/*_result.json viewer/ 2>/dev/null || true
+          cp -f "tests_output/${MODULE}"/*_result.json viewer/ 2>/dev/null || true
 
-          # Gera manifest.json listando os *_result.json
           python - <<'PY'
           import json, glob, os
           files = sorted([os.path.basename(p) for p in glob.glob("viewer/*_result.json")])
@@ -112,17 +152,15 @@ jobs:
           print("[viewer] manifest.json:", files)
           PY
 
-          # >>> usa o template do repo <<<
           cp .github/viewer_template.html viewer/index.html
-
-          # Garante diferença a cada execução (evita "Nothing to deploy")
           echo "build: ${{ github.sha }} @ $(date -u +%FT%TZ)" > viewer/build.txt
 
       - name: Publicar viewer no GitHub Pages
-        if: ${{ hashFiles('viewer/**') != '' }}  # publica se existir QUALQUER arquivo em viewer/
+        if: github.event_name != 'pull_request' && steps.module_scan.outputs.has_tests == 'true' && hashFiles('viewer/**') != ''
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./viewer
-          commit_message: "deploy: viewer (${{ github.sha }})"
-
+          destination_dir: ${{ matrix.module }}
+          keep_files: true
+          commit_message: "deploy: viewer/${{ matrix.module }} (${{ github.sha }})"
