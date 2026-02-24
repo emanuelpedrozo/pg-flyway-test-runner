@@ -292,6 +292,7 @@ BEGIN
     WHERE upper(COALESCE(f->'properties'->>'tipo', '')) IN (
         'AREA_IMOVEL', 'HIDRICO_IMOVEL', 'AREA_CONSOLIDADA'
     )
+    OR upper(COALESCE(f->'properties'->>'tipo', '')) LIKE 'APP_%'
     OR upper(COALESCE(f->'properties'->>'tipo', '')) NOT LIKE 'APP_%'
        AND upper(COALESCE(f->'properties'->>'tipo', '')) NOT IN (
            'RIO_ATE_10','RIO_10_A_50','RIO_50_A_200','RIO_200_A_600','RIO_ACIMA_600',
@@ -679,7 +680,11 @@ BEGIN
     FROM jsonb_array_elements(features_all) AS f
     WHERE upper(COALESCE(f->'properties'->>'tipo', '')) IN (
         'AREA_IMOVEL', 'AREA_IMOVEL_LIQUIDA', 'HIDRICO_IMOVEL',
-        'AREA_CONSOLIDADA', 'VETACAO_NATIVA', 'AREA_NAO_CLASSIFICADA'
+        'AREA_CONSOLIDADA', 'VETACAO_NATIVA', 'AREA_NAO_CLASSIFICADA',
+        'RIO_ATE_10','RIO_10_A_50','RIO_50_A_200','RIO_200_A_600','RIO_ACIMA_600',
+        'LAGO_NATURAL','NASCENTE_OLHO_DAGUA','RESERVATORIO_ARTIFICIAL_DECORRENTE_BARRAMENTO',
+        'VEREDA','RESTINGA','BANHADO','MANGUEZAL',
+        'RESERVATORIO_GERACAO_ENERGIA_ATE_24_08_2001'
     )
     OR upper(COALESCE(f->'properties'->>'tipo', '')) NOT LIKE 'APP_%'
        AND upper(COALESCE(f->'properties'->>'tipo', '')) NOT IN (
@@ -2447,5 +2452,4 @@ BEGIN
 END;
 $function$
 ;
-
 
