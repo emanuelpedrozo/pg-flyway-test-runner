@@ -164,3 +164,45 @@ jobs:
           destination_dir: ${{ matrix.module }}
           keep_files: true
           commit_message: "deploy: viewer/${{ matrix.module }} (${{ github.sha }})"
+
+  pages-index:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Gerar index modular do GitHub Pages
+        run: |
+          set -euo pipefail
+          mkdir -p pages_root
+          cat > pages_root/index.html <<'HTML'
+          <!doctype html>
+          <html lang="pt-br">
+          <head>
+            <meta charset="utf-8"/>
+            <meta name="viewport" content="width=device-width,initial-scale=1"/>
+            <title>GeoJSON Viewers</title>
+            <style>
+              body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:32px;line-height:1.4}
+              h1{margin:0 0 12px}
+              ul{padding-left:18px}
+              a{font-weight:600}
+            </style>
+          </head>
+          <body>
+            <h1>GeoJSON Viewers por módulo</h1>
+            <p>Escolha o módulo:</p>
+            <ul>
+              <li><a href="./dpg/">DPG</a></li>
+              <li><a href="./prepreenchido/">Prepreenchido</a></li>
+            </ul>
+          </body>
+          </html>
+          HTML
+
+      - name: Publicar index modular na raiz do Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./pages_root
+          keep_files: true
+          commit_message: "deploy: pages index (${{ github.sha }})"
