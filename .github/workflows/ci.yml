@@ -155,54 +155,65 @@ jobs:
           cp .github/viewer_template.html viewer/index.html
           echo "build: ${{ github.sha }} @ $(date -u +%FT%TZ)" > viewer/build.txt
 
-      - name: Publicar viewer no GitHub Pages
-        if: github.event_name != 'pull_request' && steps.module_scan.outputs.has_tests == 'true' && hashFiles('viewer/**') != ''
-        uses: peaceiris/actions-gh-pages@v3
+      - name: Upload do viewer do módulo
+        if: steps.module_scan.outputs.has_tests == 'true' && hashFiles('viewer/**') != ''
+        uses: actions/upload-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./viewer
-          destination_dir: ${{ matrix.module }}
-          keep_files: true
-          commit_message: "deploy: viewer/${{ matrix.module }} (${{ github.sha }})"
+          name: pages-viewer-${{ matrix.module }}
+          path: viewer/**
+          if-no-files-found: warn
 
-  pages-index:
+  deploy-pages:
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name != 'pull_request'
     steps:
-      - name: Gerar index modular do GitHub Pages
+      - name: Baixar viewers dos módulos
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pages-viewer-*
+          path: pages_artifacts
+          merge-multiple: false
+
+      - name: Montar site completo do Pages
         run: |
           set -euo pipefail
-          mkdir -p pages_root
-          cat > pages_root/index.html <<'HTML'
-          <!doctype html>
-          <html lang="pt-br">
-          <head>
-            <meta charset="utf-8"/>
-            <meta name="viewport" content="width=device-width,initial-scale=1"/>
-            <title>GeoJSON Viewers</title>
-            <style>
-              body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:32px;line-height:1.4}
-              h1{margin:0 0 12px}
-              ul{padding-left:18px}
-              a{font-weight:600}
-            </style>
-          </head>
-          <body>
-            <h1>GeoJSON Viewers por módulo</h1>
-            <p>Escolha o módulo:</p>
-            <ul>
-              <li><a href="./dpg/">DPG</a></li>
-              <li><a href="./prepreenchido/">Prepreenchido</a></li>
-            </ul>
-          </body>
-          </html>
-          HTML
+          mkdir -p site
 
-      - name: Publicar index modular na raiz do Pages
+          for d in pages_artifacts/pages-viewer-*; do
+            [ -d "$d" ] || continue
+            module="$(basename "$d")"
+            module="${module#pages-viewer-}"
+            mkdir -p "site/$module"
+            cp -R "$d"/. "site/$module"/
+          done
+
+          # Index raiz com módulos detectados dinamicamente
+          {
+            echo '<!doctype html>'
+            echo '<html lang="pt-br">'
+            echo '<head>'
+            echo '  <meta charset="utf-8"/>'
+            echo '  <meta name="viewport" content="width=device-width,initial-scale=1"/>'
+            echo '  <title>GeoJSON Viewers</title>'
+            echo '  <style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:32px;line-height:1.4}h1{margin:0 0 12px}ul{padding-left:18px}a{font-weight:600}</style>'
+            echo '</head>'
+            echo '<body>'
+            echo '  <h1>GeoJSON Viewers por módulo</h1>'
+            echo '  <p>Escolha o módulo:</p>'
+            echo '  <ul>'
+            for module in $(find site -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort); do
+              printf '    <li><a href="./%s/">%s</a></li>\n' "$module" "$module"
+            done
+            echo '  </ul>'
+            echo '</body>'
+            echo '</html>'
+          } > site/index.html
+
+      - name: Publicar site modular no GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./pages_root
-          keep_files: true
-          commit_message: "deploy: pages index (${{ github.sha }})"
+          publish_dir: ./site
+          force_orphan: true
+          commit_message: "deploy: pages modular site (${{ github.sha }})"
