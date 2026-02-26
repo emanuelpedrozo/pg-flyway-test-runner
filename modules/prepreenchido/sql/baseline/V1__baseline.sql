@@ -17,8 +17,8 @@ BEGIN
     RETURN NULL;
   END IF;
 
-  lon := ST_X(ST_Transform(ST_Centroid(p_geom), 4326));
-  lat := ST_Y(ST_Transform(ST_Centroid(p_geom), 4326));
+  lon := ST_X(ST_Transform(ST_Centroid(p_geom), 4674));
+  lat := ST_Y(ST_Transform(ST_Centroid(p_geom), 4674));
   zone := floor((lon + 180.0) / 6.0)::integer + 1;
 
   IF lat >= 0 THEN
